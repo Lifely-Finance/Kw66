@@ -178,15 +178,22 @@ async function readBattery(){
 }
 
 /* ---------- 0xC5: произвольный текст на часы ----------
-   Реконструировано из btsnoop_hci.log официального приложения (не проверено
-   на реальном железе). Наблюдалась такая картина при пуше тестового
-   уведомления:
-     TX (33F1): C5 00 <до 18 байт> , C5 01 <до 18 байт> , … , C5 FD
-     RX (33F2): C5 00 , C5 01 , … , C5 FD <2 байта статуса>
-   Полезная нагрузка — сплошной поток UTF-16BE, порезанный на куски БЕЗ
-   выравнивания по границе символа (т.е. просто нарезаем массив байт кусками
-   по 18, не думая о символах) — код часов сам досклеивает поток.
-   seq идёт 0,1,2,… и не должен долетать до 0xFD (это терминатор). */
+   Уточнено по обратной связи с реального железа + повторной сверке с
+   btsnoop: у сообщения есть служебный заголовок, который в v3.2 был по
+   ошибке пропущен (первый байт "съедался" как часть текста, отсюда баг
+   "текст без первого символа").
+     TX (33F1), seq=0:  C5 00 <id:1б> <len:1б, байт текста всего> <текст…>
+     TX (33F1), seq>0:  C5 <seq> <текст…, до 18 байт>
+     TX (33F1), конец:  C5 FD
+     RX (33F2): C5 <seq> — квитанция куска, C5 FD <статус> — приём завершён
+   id — похоже на категорию уведомления, не мусор: в логе единственный
+   пойманный случай id=0x00 — это уведомление о звонке (на часах это
+   показывается как экран вызова с кнопкой сброса — ровно то, что ты
+   словил через пробелы). Ненулевые id (в логе — 0x02/0x04/0x09/0x13/0x15)
+   давали обычную иконку приложения. По умолчанию используем 0x01 —
+   не проверено на других значениях, кроме факта "не 0". len — 1 байт,
+   т.е. надёжно ловит текст максимум ~127 символов (255 байт UTF-16BE);
+   длиннее — часы, вероятно, либо обрежут, либо не поймут заголовок. */
 function utf16beBytes(str){
   const out=new Uint8Array(str.length*2);
   for(let i=0;i<str.length;i++){
@@ -196,22 +203,32 @@ function utf16beBytes(str){
   }
   return out;
 }
-async function sendWatchText(text){
+async function sendWatchText(text, id=0x01){
   if(!text) return;
   const payload=utf16beBytes(text);
+  if(payload.length>255){
+    log(`Текст слишком длинный (${payload.length} байт UTF-16BE, лимит поля длины — 255): скорее всего часы отобразят его некорректно.`);
+  }
+  const totalLen=payload.length & 0xFF;
   const CHUNK=18;
-  let seq=0;
-  for(let off=0; off<payload.length; off+=CHUNK){
+  let seq=0, off=0;
+  // первый кусок: 2 служебных байта (id, len) съедают часть бюджета в 18 байт
+  const firstText=payload.slice(0, CHUNK-2);
+  const p0=new Uint8Array(2+2+firstText.length);
+  p0[0]=0xC5; p0[1]=seq; p0[2]=id&0xFF; p0[3]=totalLen;
+  p0.set(firstText,4);
+  await send(p0);
+  seq=(seq+1)%0xFD; off=firstText.length;
+  while(off<payload.length){
     const chunk=payload.slice(off, off+CHUNK);
-    const packet=new Uint8Array(2+chunk.length);
-    packet[0]=0xC5; packet[1]=seq;
-    packet.set(chunk,2);
-    await send(packet);
-    seq=(seq+1)%0xFD; // 0xFD зарезервирован под терминатор
-    await sleep(40);  // темп между кусками — как в оригинальном логе
+    const p=new Uint8Array(2+chunk.length);
+    p[0]=0xC5; p[1]=seq; p.set(chunk,2);
+    await send(p);
+    seq=(seq+1)%0xFD; off+=CHUNK;
+    await sleep(40);
   }
   await send([0xC5,0xFD]);
-  log(`Текст отправлен на часы (${payload.length} байт полезной нагрузки, ${Math.ceil(payload.length/CHUNK)} кусков).`);
+  log(`Текст отправлен на часы: id=0x${(id&0xFF).toString(16).padStart(2,"0")}, ${payload.length} байт полезной нагрузки.`);
 }
 
 /* ---------- сборка фрагментов и декодинг ---------- */
@@ -752,7 +769,11 @@ $("battery").onclick=readBattery;
 $("steps").onclick=()=>send([0xB2,0xFA]).catch(e=>log(`Steps ERROR: ${e.message}`));
 $("hrReq").onclick=()=>send([0xE5,0x00]).catch(e=>log(`HR ERROR: ${e.message}`));
 $("sendCustom").onclick=()=>{ try{ send(hexToBytes($("custom").value)); }catch(e){ log(`CUSTOM ERROR: ${e.message}`); } };
-$("sendWatchText").onclick=()=>{ sendWatchText($("watchText").value).catch(e=>log(`TEXT ERROR: ${e.message}`)); };
+$("sendWatchText").onclick=()=>{
+  const idHex=($("watchTextId").value||"01").trim();
+  const id=parseInt(idHex,16);
+  sendWatchText($("watchText").value, isNaN(id)?0x01:id).catch(e=>log(`TEXT ERROR: ${e.message}`));
+};
 $("recStart").onclick=()=>recovery.start();
 $("recCancel").onclick=()=>recovery.cancel();
 $("stressToggle").onclick=()=>stress.toggle();
