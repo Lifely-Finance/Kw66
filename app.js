@@ -1,88 +1,177 @@
-const UUID={
- service:'000055ff-0000-1000-8000-00805f9b34fb', write:'000033f1-0000-1000-8000-00805f9b34fb', notify:'000033f2-0000-1000-8000-00805f9b34fb',
- service5:'000056ff-0000-1000-8000-00805f9b34fb', write5:'000034f1-0000-1000-8000-00805f9b34fb', notify5:'000034f2-0000-1000-8000-00805f9b34fb'
+const UUID = {
+  service4: "000055ff-0000-1000-8000-00805f9b34fb",
+  service5: "000056ff-0000-1000-8000-00805f9b34fb",
+  tx4: "000033f1-0000-1000-8000-00805f9b34fb",
+  rx4: "000033f2-0000-1000-8000-00805f9b34fb",
+  tx5: "000034f1-0000-1000-8000-00805f9b34fb",
+  rx5: "000034f2-0000-1000-8000-00805f9b34fb",
+  txAlt: "0000b003-0000-1000-8000-00805f9b34fb",
+  rxAlt: "0000b004-0000-1000-8000-00805f9b34fb",
+  battery: "00002a19-0000-1000-8000-00805f9b34fb"
 };
-let device=null,server=null,writeChar=null,notifyChar=null,lines=[],rxCount=0,lastService=null;
-const $=id=>document.getElementById(id);
-const norm=s=>String(s).toLowerCase();
-const hex=b=>Array.from(new Uint8Array(b)).map(x=>x.toString(16).padStart(2,'0')).join(' ').toUpperCase();
-function log(s){const t=new Date().toLocaleTimeString();lines.push(`[${t}] ${s}`);if(lines.length>2000)lines.shift();$('log').textContent=lines.join('\n');$('log').scrollTop=$('log').scrollHeight;}
-function diag(s,ok=true){const li=document.createElement('li');li.textContent=s;li.className=ok?'ok':'bad';$('diag').appendChild(li);}
-function setStatus(text,cls=''){const el=$('status');el.textContent=text;el.className='pill '+cls;}
-function setConnected(v){$('connect').disabled=v;$('disconnect').disabled=!v;$('reconnect').disabled=!device;['readBattery','readHr','readSteps'].forEach(id=>$(id).disabled=!v);$('gatt').textContent=v?'connected':'—';if(!v){$('profile').textContent='Не подключен';}}
-function updateBrowser(){
- const supported=!!navigator.bluetooth; $('btState').textContent=supported?'доступен':'не доступен';
- if(!supported){$('browserWarning').textContent='Web Bluetooth не поддерживается этим браузером. Открой GitHub Pages именно в Chrome на Android.';$('browserWarning').classList.remove('hidden');diag('Web Bluetooth API не найден',false);return false;}
- if(!window.isSecureContext){$('browserWarning').textContent='Нужен HTTPS. GitHub Pages должен открываться с https://...';$('browserWarning').classList.remove('hidden');diag('Secure Context отсутствует',false);return false;}
- diag('Web Bluetooth доступен');diag('HTTPS / Secure Context OK');return true;
+
+let device=null, server=null, tx=null, rx=null, batteryChar=null;
+let logRows=[], rxCount=0;
+
+const $ = id => document.getElementById(id);
+function now(){return new Date().toLocaleTimeString();}
+function log(s){
+  const line=`[${now()}] ${s}`;
+  $("log").textContent += ( $("log").textContent ? "\n" : "" ) + line;
+  $("log").scrollTop=$("log").scrollHeight;
 }
-function onDisconnect(){log('GATT отключён');setStatus('Отключено','bad');server=null;writeChar=null;notifyChar=null;setConnected(false);}
-function propertyList(c){const p=c.properties||{};return ['broadcast','read','writeWithoutResponse','write','notify','indicate','authenticatedSignedWrites','reliableWrite','writableAuxiliaries'].filter(k=>p[k]).join(', ');}
-function characteristicSummary(c){return `${c.uuid} [${propertyList(c)}]`;}
-async function inspectServices(){
- const services=await server.getPrimaryServices(); log(`Найдено primary services: ${services.length}`);
- let profileFound=false;
- $('profileBox').innerHTML='';
- for(const s of services){
-   const block=document.createElement('div');block.className='service';
-   const title=document.createElement('div');title.innerHTML=`<b>SERVICE</b> <code>${s.uuid}</code>`;block.appendChild(title);
-   const chars=await s.getCharacteristics();
-   for(const c of chars){
-     log(`CHAR ${characteristicSummary(c)}`);
-     const row=document.createElement('div');row.className='char';row.textContent=`${c.uuid} · ${propertyList(c)}`;block.appendChild(row);
-     const id=norm(c.uuid);
-     if(id===UUID.write || id===UUID.write5){writeChar=c;lastService=s;profileFound=true;}
-     if(id===UUID.notify || id===UUID.notify5){notifyChar=c;lastService=s;profileFound=true;}
-   }
-   $('profileBox').appendChild(block);
- }
- // Fallback: locate any writable + notifying characteristic inside known GloryFit services.
- if(!profileFound){
-   for(const sid of [UUID.service,UUID.service5]){try{const s=await server.getPrimaryService(sid);const cs=await s.getCharacteristics();for(const c of cs){if(!writeChar&&(c.properties.write||c.properties.writeWithoutResponse))writeChar=c;if(!notifyChar&&(c.properties.notify||c.properties.indicate))notifyChar=c;}if(writeChar||notifyChar){lastService=s;profileFound=true;}}catch(e){}}
- }
- $('profile').textContent=profileFound?'найден':'не найден';
- return profileFound;
+function hex(data){
+  return [...new Uint8Array(data)].map(x=>x.toString(16).padStart(2,"0").toUpperCase()).join(" ");
 }
-async function enableNotify(){
- if(!notifyChar){log('Notify/Indicate characteristic не найдена.');return false;}
- try{
-   await notifyChar.startNotifications();
-   notifyChar.addEventListener('characteristicvaluechanged',onNotify);
-   log(`Уведомления включены: ${notifyChar.uuid}`);return true;
- }catch(e){log(`NOTIFY ERROR: ${e.message}`);return false;}
+function hexToBytes(s){
+  const clean=s.replace(/0x/gi,"").replace(/[^0-9a-f]/gi,"");
+  if(clean.length===0 || clean.length%2) throw new Error("Некорректный HEX");
+  const out=new Uint8Array(clean.length/2);
+  for(let i=0;i<out.length;i++) out[i]=parseInt(clean.slice(i*2,i*2+2),16);
+  return out;
+}
+function setEnabled(v){
+  ["battery","hr","steps","sendCustom"].forEach(id=>$(id).disabled=!v);
+}
+function record(direction, bytes){
+  const value=hex(bytes.buffer || bytes);
+  logRows.push({time:new Date().toISOString(),direction,hex:value});
+  if(direction==="RX"){
+    rxCount++; $("rxCount").textContent=rxCount; $("lastRx").textContent=value;
+  } else $("lastTx").textContent=value;
+}
+function looksLike(uuid, target){return uuid.toLowerCase()===target.toLowerCase();}
+function characteristicProps(c){
+  const p=c.properties || {};
+  const out=[];
+  if(p.read) out.push("read");
+  if(p.write) out.push("write");
+  if(p.writeWithoutResponse) out.push("writeWithoutResponse");
+  if(p.notify) out.push("notify");
+  if(p.indicate) out.push("indicate");
+  return out.join(", ") || "—";
+}
+function findTx(candidates){
+  return candidates.find(c=>c.properties?.write) ||
+         candidates.find(c=>c.properties?.writeWithoutResponse) || null;
+}
+function findRx(candidates){
+  return candidates.find(c=>c.properties?.notify) ||
+         candidates.find(c=>c.properties?.indicate) || null;
+}
+async function subscribe(c){
+  if(!c) return;
+  if(c.properties.notify || c.properties.indicate){
+    await c.startNotifications();
+    c.addEventListener("characteristicvaluechanged", e=>{
+      const b=new Uint8Array(e.target.value.buffer.slice(0));
+      record("RX",b);
+      decodePacket(b);
+    });
+    log(`Уведомления включены: ${c.uuid}`);
+  }
+}
+function decodePacket(b){
+  if(!b.length) return;
+  const op=b[0];
+  if(op===0xE5 && b.length>8){
+    const hr=b[8];
+    if(hr>=40 && hr<=200) log(`  ↳ E5: кандидат HR = ${hr} bpm`);
+  }
+  if(op===0xA2) log(`  ↳ A2: ответ батареи получен`);
+  if(op===0xB1) log(`  ↳ B1: realtime steps packet`);
+  if(op===0xB2) log(`  ↳ B2: steps/history packet`);
+}
+async function send(bytes){
+  if(!tx) throw new Error("TX characteristic не найдена");
+  const data=bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+  if(tx.properties.writeWithoutResponse && !tx.properties.write){
+    await tx.writeValueWithoutResponse(data);
+  } else {
+    await tx.writeValue(data);
+  }
+  record("TX",data);
 }
 async function connect(){
- if(!updateBrowser())return;
- try{
-   setStatus('Выбор устройства…');
-   log('Открываю системный BLE-выбор устройства.');
-   // acceptAllDevices is intentional: some KW66 firmware does not advertise the GloryFit service UUID.
-   device=await navigator.bluetooth.requestDevice({acceptAllDevices:true,optionalServices:[UUID.service,UUID.service5,'battery_service']});
-   device.addEventListener('gattserverdisconnected',onDisconnect);
-   $('deviceName').textContent=device.name||'(без имени)';
-   log(`Выбрано: ${device.name||'(без имени)'}`);
-   setStatus('Подключение…');
-   server=await device.gatt.connect();
-   $('gatt').textContent='connected';
-   log('GATT connected.');
-   const found=await inspectServices();
-   if(!found)log('GloryFit UUID не обнаружены. Это важно: пришли лог из раздела RAW/диагностики, не отправляя команды.');
-   const notified=await enableNotify();
-   setConnected(true);setStatus(notified?'Готово':'Подключено','ok');
-   if(found)log('Профиль GloryFit распознан.');
- }catch(e){
-   if(e.name==='NotFoundError'){log('Выбор устройства отменён пользователем.');setStatus('Отменено');return;}
-   log(`ОШИБКА: ${e.name||'Error'}: ${e.message}`);setStatus('Ошибка','bad');setConnected(false);
- }
+  if(!navigator.bluetooth){log("ОШИБКА: Web Bluetooth недоступен в этом браузере.");return;}
+  try{
+    log("Открываю системный BLE-выбор устройства.");
+    device=await navigator.bluetooth.requestDevice({
+      acceptAllDevices:true,
+      optionalServices:[UUID.service4,UUID.service5,UUID.battery]
+    });
+    $("device").textContent=`Выбрано: ${device.name||"(без имени)"} (${device.id})`;
+    device.addEventListener("gattserverdisconnected",()=>{
+      log("GATT disconnected.");
+      server=null; tx=null; rx=null; batteryChar=null; setEnabled(false);
+    });
+    server=await device.gatt.connect();
+    log("GATT connected.");
+    const services=await server.getPrimaryServices();
+    log(`Найдено primary services: ${services.length}`);
+
+    const chars=[];
+    for(const s of services){
+      log(`SERVICE ${s.uuid}`);
+      const cs=await s.getCharacteristics();
+      for(const c of cs){
+        chars.push(c);
+        log(`CHAR ${c.uuid} [${characteristicProps(c)}]`);
+      }
+    }
+
+    tx=findTx(chars.filter(c=>looksLike(c.uuid,UUID.tx4)||looksLike(c.uuid,UUID.tx5)||looksLike(c.uuid,UUID.txAlt)));
+    rx=findRx(chars.filter(c=>looksLike(c.uuid,UUID.rx4)||looksLike(c.uuid,UUID.rx5)||looksLike(c.uuid,UUID.rxAlt)));
+    batteryChar=chars.find(c=>looksLike(c.uuid,UUID.battery));
+
+    $("txChar").textContent=tx?.uuid||"не найден";
+    $("rxChar").textContent=rx?.uuid||"не найден";
+
+    if(tx || rx){
+      $("profile").innerHTML='<span class="ok">GloryFit распознан</span>';
+      log("Профиль GloryFit распознан.");
+    } else {
+      $("profile").innerHTML='<span class="bad">GloryFit не найден</span>';
+    }
+
+    await subscribe(rx);
+
+    if(batteryChar?.properties?.notify && !rx){
+      await subscribe(batteryChar);
+    }
+
+    setEnabled(!!tx);
+  }catch(e){
+    log(`ОШИБКА: ${e.name||"Error"}: ${e.message||e}`);
+  }
 }
-async function reconnect(){if(!device){return connect();}try{setStatus('Переподключение…');server=await device.gatt.connect();$('gatt').textContent='connected';writeChar=null;notifyChar=null;await inspectServices();await enableNotify();setConnected(true);setStatus('Готово','ok');}catch(e){log(`RECONNECT ERROR: ${e.message}`);setStatus('Ошибка','bad');setConnected(false);}}
-function onNotify(ev){const v=ev.target.value;const h=hex(v.buffer);rxCount++;$('rxCount').textContent=rxCount;log(`RX ${h}`);const a=new Uint8Array(v.buffer);if(a[0]===0xE5&&a.length>8){const hr=a[8];if(hr>=40&&hr<=200){$('hr').textContent=hr+' bpm';log(`  → кандидат HR: ${hr} bpm`);}}}
-async function send(bytes,label){
- if(!writeChar){log('Write characteristic не найдена. Команда не отправлена.');return;}
- try{const data=new Uint8Array(bytes);if(writeChar.properties.writeWithoutResponse&&!writeChar.properties.write){await writeChar.writeValueWithoutResponse(data);}else if(writeChar.properties.write){await writeChar.writeValue(data);}else{throw new Error('характеристика не поддерживает write');}log(`TX ${label}: ${hex(data)}`);}catch(e){log(`TX ERROR ${e.message}`);}
+async function readBattery(){
+  try{
+    if(batteryChar?.properties?.read){
+      const v=await batteryChar.readValue();
+      const b=new Uint8Array(v.buffer.slice(0));
+      log(`BATTERY read ← ${hex(b.buffer)}`);
+      record("RX",b);
+    }else await send([0xA2]);
+  }catch(e){log(`Battery ERROR: ${e.message}`);}
 }
-$('connect').onclick=connect;$('reconnect').onclick=reconnect;$('disconnect').onclick=()=>{if(device?.gatt?.connected)device.gatt.disconnect();else onDisconnect()};
-$('readBattery').onclick=()=>send([0xA2],'A2');$('readHr').onclick=()=>send([0xE5,0x00],'E5 00');$('readSteps').onclick=()=>send([0xB2,0xFA],'B2 FA');
-$('clear').onclick=()=>{lines=[];$('log').textContent='Очищено.';};$('export').onclick=()=>{const blob=new Blob([lines.join('\n')],{type:'text/plain;charset=utf-8'}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download='kw66-ble-log-'+Date.now()+'.txt';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);};
-updateBrowser();
-if('serviceWorker'in navigator)window.addEventListener('load',()=>navigator.serviceWorker.register('./sw.js').then(()=>log('Service Worker: OK')).catch(e=>log('Service Worker: '+e.message)));
+async function disconnect(){
+  try{if(device?.gatt?.connected) device.gatt.disconnect();}catch{}
+}
+$("connect").onclick=connect;
+$("disconnect").onclick=disconnect;
+$("clear").onclick=()=>{$("log").textContent="";logRows=[];rxCount=0;$("rxCount").textContent="0";$("lastRx").textContent="—";$("lastTx").textContent="—";};
+$("export").onclick=()=>{
+  const blob=new Blob([JSON.stringify({device:device?.name||null,exportedAt:new Date().toISOString(),packets:logRows},null,2)],{type:"application/json"});
+  const a=document.createElement("a"); a.href=URL.createObjectURL(blob); a.download="kw66-log.json"; a.click(); URL.revokeObjectURL(a.href);
+};
+$("battery").onclick=readBattery;
+$("hr").onclick=()=>send([0xE5,0x00]).catch(e=>log(`HR ERROR: ${e.message}`));
+$("steps").onclick=()=>send([0xB2,0xFA]).catch(e=>log(`STEPS ERROR: ${e.message}`));
+$("sendCustom").onclick=()=>{
+  try{send(hexToBytes($("custom").value));}catch(e){log(`CUSTOM ERROR: ${e.message}`);}
+};
+if("serviceWorker" in navigator){
+  navigator.serviceWorker.register("./sw.js").then(()=>log("Service Worker: OK")).catch(e=>log(`Service Worker ERROR: ${e.message}`));
+}
+log(`Web Bluetooth: ${navigator.bluetooth ? "доступен" : "недоступен"}`);

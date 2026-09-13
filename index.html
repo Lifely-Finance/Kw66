@@ -1,28 +1,81 @@
 <!doctype html>
 <html lang="ru">
 <head>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<meta name="theme-color" content="#0b1020"><meta name="description" content="KW66 Lab v2.1 — исследование IMILAB KW66 / GloryFit BLE">
-<link rel="manifest" href="manifest.webmanifest"><link rel="stylesheet" href="style.css"><title>KW66 Lab v2.1</title>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#111827">
+  <link rel="manifest" href="manifest.json">
+  <title>KW66 Lab v2.2</title>
+  <style>
+    :root{color-scheme:dark;font-family:system-ui,-apple-system,Segoe UI,sans-serif}
+    body{margin:0;background:#0b1020;color:#eef2ff}
+    main{max-width:900px;margin:auto;padding:18px}
+    h1{font-size:25px;margin:0 0 4px} h2{font-size:17px;margin:0 0 12px}
+    .muted{color:#9ca3af;font-size:13px}
+    .card{background:#151c2f;border:1px solid #29334d;border-radius:14px;padding:15px;margin:12px 0}
+    button{border:0;border-radius:10px;padding:11px 14px;margin:4px;background:#26334f;color:#fff;font-weight:600}
+    button.primary{background:#2563eb} button.warn{background:#7c3aed}
+    button:disabled{opacity:.45}
+    .row{display:flex;flex-wrap:wrap;gap:5px}
+    .status{font-family:ui-monospace,monospace;font-size:13px;white-space:pre-wrap;max-height:260px;overflow:auto;background:#090d18;border-radius:9px;padding:10px}
+    .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px}
+    .value{font-size:25px;font-weight:700}.label{color:#9ca3af;font-size:12px}
+    input{background:#0b1020;color:#fff;border:1px solid #35415e;border-radius:8px;padding:10px;width:100%;box-sizing:border-box}
+    code{font-family:ui-monospace,monospace;font-size:12px;word-break:break-all}
+    .ok{color:#6ee7b7}.bad{color:#fca5a5}
+  </style>
 </head>
-<body><main class="wrap">
-<header><div><h1>KW66 Lab <small>v2</small></h1><p>Исследовательская лаборатория IMILAB KW66 / GloryFit</p></div><span id="status" class="pill">Готово</span></header>
-<section class="card hero">
-<button id="connect" class="primary">🔵 Найти и подключить KW66</button>
-<div class="subbuttons"><button id="reconnect" disabled>Переподключить</button><button id="disconnect" disabled>Отключить</button></div>
-<div id="browserWarning" class="warning hidden"></div>
-<div class="grid">
-<div><span>Устройство</span><b id="deviceName">—</b></div><div><span>Bluetooth</span><b id="btState">—</b></div>
-<div><span>GATT</span><b id="gatt">—</b></div><div><span>GloryFit</span><b id="profile">Не проверен</b></div>
-<div><span>Батарея</span><b id="battery">—</b></div><div><span>Пульс</span><b id="hr">—</b></div>
-<div><span>Шаги</span><b id="steps">—</b></div><div><span>Пакетов RX</span><b id="rxCount">0</b></div>
-</div></section>
-<section class="card"><h2>1. BLE-профиль</h2><div id="profileBox" class="profileBox">После подключения здесь появятся найденные сервисы и характеристики.</div></section>
-<section class="card"><h2>2. Команды KW66 / GloryFit</h2><div class="buttons">
-<button id="readBattery" disabled>🔋 Батарея (A2)</button><button id="readHr" disabled>❤️ Пульс (E5 00)</button><button id="readSteps" disabled>🚶 Шаги (B2 FA)</button>
-</div><p class="hint">Команды отправляются только после успешного обнаружения write-характеристики. Все ответы остаются в RAW-логе.</p></section>
-<section class="card"><div class="row"><h2>3. RAW BLE</h2><div><button id="clear">Очистить</button><button id="export">Экспорт</button></div></div><pre id="log">Готово. Нажми «Найти и подключить KW66».</pre></section>
-<section class="card small"><h2>Известный профиль GloryFit</h2>
-<p><b>Service</b> <code>000055ff-0000-1000-8000-00805f9b34fb</code></p><p><b>Write</b> <code>000033f1-0000-1000-8000-00805f9b34fb</code></p><p><b>Notify</b> <code>000033f2-0000-1000-8000-00805f9b34fb</code></p><p><b>BLE5 Service</b> <code>000056ff-0000-1000-8000-00805f9b34fb</code></p><p><b>BLE5 Write</b> <code>000034f1-0000-1000-8000-00805f9b34fb</code></p><p><b>BLE5 Notify</b> <code>000034f2-0000-1000-8000-00805f9b34fb</code></p></section>
-<section class="card small"><h2>Диагностика</h2><ul id="diag"><li>Web Bluetooth: проверка…</li></ul></section>
-</main><script src="app.js"></script></body></html>
+<body>
+<main>
+  <h1>KW66 Lab <span class="muted">v2.2</span></h1>
+  <div class="muted">GloryFit BLE / Command Lab</div>
+
+  <section class="card">
+    <h2>1. Подключение</h2>
+    <div class="row">
+      <button id="connect" class="primary">Найти и подключить</button>
+      <button id="disconnect">Отключить</button>
+      <button id="clear">Очистить лог</button>
+      <button id="export">Экспорт JSON</button>
+    </div>
+    <div id="device" class="muted">Устройство не подключено</div>
+  </section>
+
+  <section class="card">
+    <h2>2. GloryFit BLE-профиль</h2>
+    <div id="profile">Ожидание подключения…</div>
+    <div class="muted" style="margin-top:8px">
+      TX: <code id="txChar">—</code><br>
+      RX: <code id="rxChar">—</code>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>3. Command Lab</h2>
+    <div class="row">
+      <button id="battery" disabled>🔋 Battery — A2</button>
+      <button id="hr" disabled>❤️ Heart Rate — E5 00</button>
+      <button id="steps" disabled>🚶 Steps — B2 FA</button>
+    </div>
+    <div class="grid">
+      <div><div class="label">Последняя команда</div><div id="lastTx" class="value">—</div></div>
+      <div><div class="label">RX пакетов</div><div id="rxCount" class="value">0</div></div>
+      <div><div class="label">Последний RX</div><div id="lastRx" class="value" style="font-size:14px">—</div></div>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>4. Custom command</h2>
+    <input id="custom" placeholder="Например: A2 или E5 00">
+    <div class="row"><button id="sendCustom" class="warn" disabled>Отправить HEX</button></div>
+    <div class="muted">Команда отправляется в выбранную TX characteristic. Используй только команды, которые понимаешь.</div>
+  </section>
+
+  <section class="card">
+    <h2>5. RAW BLE log</h2>
+    <div id="log" class="status"></div>
+  </section>
+</main>
+<script src="app.js"></script>
+</body>
+</html>
