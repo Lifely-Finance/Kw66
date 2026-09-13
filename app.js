@@ -774,6 +774,28 @@ $("sendWatchText").onclick=()=>{
   const id=parseInt(idHex,16);
   sendWatchText($("watchText").value, isNaN(id)?0x01:id).catch(e=>log(`TEXT ERROR: ${e.message}`));
 };
+// живой счётчик + превью обрезки: по замеру на реальных часах длиннее
+// ~158 байт UTF-16BE текст просто обрезается и заменяется многоточием —
+// без переноса на "страницы". Показываем, что реально останется на экране.
+const WATCH_TEXT_SAFE_BYTES=158;
+function updateWatchTextCounter(){
+  const t=$("watchText").value;
+  const bytes=utf16beBytes(t);
+  const b=bytes.length;
+  const el=$("watchTextCounter");
+  let extra="";
+  if(b>WATCH_TEXT_SAFE_BYTES){
+    // приблизительная обрезка по символам (не байтам) — часы режут по тексту,
+    // не по сырым байтам, поэтому считаем в JS-символах, а не в utf16be-байтах
+    const safeChars=Math.floor(WATCH_TEXT_SAFE_BYTES/2);
+    const preview=t.slice(0,safeChars-1)+"…";
+    extra=` — на экране, вероятно: "${preview}"`;
+  }
+  el.textContent=`${t.length} симв. / ${b} байт${extra}`;
+  el.className=b>255?"muted bad":(b>WATCH_TEXT_SAFE_BYTES?"muted warn-t":"muted");
+}
+$("watchText").addEventListener("input", updateWatchTextCounter);
+updateWatchTextCounter();
 $("recStart").onclick=()=>recovery.start();
 $("recCancel").onclick=()=>recovery.cancel();
 $("stressToggle").onclick=()=>stress.toggle();
