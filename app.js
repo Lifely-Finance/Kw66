@@ -1,6 +1,11 @@
 /* ============================================================
-   KW66 Lab v3.0
+   KW66 Lab v3.1
    GloryFit BLE: command lab + HR analytics + fuzzer + btsnoop
+   v3.1: перенесены фиксы буферизации из отдельной ветки —
+   F7=11 байт (min/max HR в хвосте), E5 не фиксированной длины
+   (2 или 4 байта, resync+debounce вместо склейки с соседним
+   пакетом), восстановлена ветка writeValueWithoutResponse,
+   добавлено пассивное прослушивание FEE7.
    ============================================================ */
 "use strict";
 
@@ -14,16 +19,24 @@ const UUID = {
   rx5: "000034f2-0000-1000-8000-00805f9b34fb",
   txAlt: "0000b003-0000-1000-8000-00805f9b34fb",
   rxAlt: "0000b004-0000-1000-8000-00805f9b34fb",
-  battery: "00002a19-0000-1000-8000-00805f9b34fb"
+  battery: "00002a19-0000-1000-8000-00805f9b34fb",
+  fee7Notify: "0000fea1-0000-1000-8000-00805f9b34fb",
+  fee7Indicate: "0000fea2-0000-1000-8000-00805f9b34fb"
 };
 const LABELS = {
   [UUID.rx4]: "BLE4", [UUID.tx4]: "BLE4",
   [UUID.rx5]: "BLE5", [UUID.tx5]: "BLE5",
   [UUID.rxAlt]: "ALT", [UUID.txAlt]: "ALT",
-  [UUID.battery]: "BAT"
+  [UUID.battery]: "BAT",
+  [UUID.fee7Notify]: "FEE7", [UUID.fee7Indicate]: "FEE7"
 };
-// ожидаемые длины пакетов по opcode
-const KNOWN_LEN = { 0xA2: 2, 0xA3: 8, 0xE5: 4, 0xF7: 9 };
+// ожидаемые длины пакетов по opcode. E5 сюда намеренно НЕ включён: на
+// практике он бывает и 2 байта ("E5 11" — отметка "идёт измерение" без
+// значения), и 4 байта ("E5 11 00 XX" с реальным пульсом) — фиксированная
+// длина склеивала короткий вариант со следующим случайным пакетом.
+// F7 — 11 байт (не 9): последние 2 байта — min/max пульса, подтверждено
+// живым значением характеристики в nRF Connect.
+const KNOWN_LEN = { 0xA2: 2, 0xA3: 8, 0xF7: 11 };
 // периодический «фон» — для фаззера и статистики не считается ответом
 const PERIODIC_OPS = new Set([0xA2, 0xF7, 0xB1]);
 const GF_KEYS = ["55ff","56ff","33f1","33f2","34f1","34f2","b003","b004","2a19"];
@@ -132,6 +145,10 @@ async function connect(){
     renderTxSelect();
     for(const c of rxCharsAll) await subscribe(c);
     if(batteryChar?.properties?.notify && !rxCharsAll.length) await subscribe(batteryChar);
+    // Пассивно слушаем малоизученный канал FEE7 (Tencent/WeRun UUID) —
+    // вдруг оттуда сама пойдёт какая-то полезная телеметрия.
+    const fee7Chars=chars.filter(c=>looksLike(c.uuid,UUID.fee7Notify)||looksLike(c.uuid,UUID.fee7Indicate));
+    for(const c of fee7Chars){ if(c.properties.notify||c.properties.indicate) await subscribe(c); }
     setConnected(txChars.length>0);
     log(`Профиль GloryFit: TX=${txChars.length}, RX=${rxCharsAll.length}`);
   }catch(e){
@@ -141,7 +158,11 @@ async function connect(){
 async function send(bytes){
   if(!activeTx) throw new Error("Нет TX-канала");
   const u8=bytes instanceof Uint8Array?bytes:new Uint8Array(bytes);
-  await activeTx.writeValue(u8);
+  if(activeTx.properties.writeWithoutResponse && !activeTx.properties.write){
+    await activeTx.writeValueWithoutResponse(u8);
+  } else {
+    await activeTx.writeValue(u8);
+  }
   record("TX", u8, activeTx.uuid);
   log(`TX → ${hex(u8)}`);
 }
@@ -169,6 +190,14 @@ function expectedLength(buf){
   }
   return null;
 }
+const KNOWN_OPCODES = [0xA2, 0xA3, 0xB1, 0xB2, 0xE5, 0xF7];
+function findNextKnownOpcodeIndex(buf){
+  for(let i=1;i<buf.length;i++){
+    if(KNOWN_OPCODES.includes(buf[i])) return i;
+  }
+  return -1;
+}
+let flushTimers={};
 function pushToBuffer(uuid, bytes){
   const key=uuid||"unknown";
   const prev=rxBuffers[key]||new Uint8Array(0);
@@ -176,13 +205,26 @@ function pushToBuffer(uuid, bytes){
   merged.set(prev,0); merged.set(bytes,prev.length);
   rxBuffers[key]=merged;
   flushBuffer(key, uuid);
+  // страховка: короткий пакет вроде "E5 11" без продолжения не гадаем
+  // сразу — ждём паузу, и если новых байт не пришло, разбираем как есть.
+  if(flushTimers[key]) clearTimeout(flushTimers[key]);
+  if(rxBuffers[key] && rxBuffers[key].length){
+    flushTimers[key]=setTimeout(()=>{
+      const pending=rxBuffers[key];
+      if(pending && pending.length){ emitPacket(pending, uuid, true); rxBuffers[key]=new Uint8Array(0); }
+    }, 25);
+  }
 }
 function flushBuffer(key, uuid){
   let buf=rxBuffers[key];
   while(buf && buf.length){
     const need=expectedLength(buf);
     if(need===null){
-      if(buf.length>=20){ emitPacket(buf, uuid, true); buf=new Uint8Array(0); }
+      // неизвестный/переменной длины opcode: ищем начало следующего
+      // известного пакета и сразу отрезаем "хвост" перед ним, не дожидаясь
+      // искусственного порога — реальную длину досдаст debounce выше.
+      const nextIdx=findNextKnownOpcodeIndex(buf);
+      if(nextIdx>0){ emitPacket(buf.slice(0,nextIdx), uuid, true); buf=buf.slice(nextIdx); continue; }
       break;
     }
     if(buf.length<need) break;
@@ -198,25 +240,28 @@ function emitPacket(bytes, uuid, isUnknown){
   decodePacket(bytes, uuid);
 }
 function decodePacket(b, uuid){
-  const src=uuid?`[${labelFor(uuid)}] `:"";
+  const label=uuid?labelFor(uuid):null;
+  if(label && label!=="BLE4" && label!=="BLE5"){
+    log(`  ↳ [${label}] сырые данные: ${hex(b)}`);
+    return;
+  }
+  const src=uuid?`[${label}] `:"";
   const op=b[0];
   if(op===0xA2 && b.length>=2){
     $("batVal").textContent=b[1];
     log(`  ↳ ${src}A2: батарея = ${b[1]}%`);
   }
-  else if(op===0xF7 && b.length===9){
+  else if(op===0xF7 && b.length===11){
     const yr=(b[2]<<8)|b[3];
-    log(`  ↳ ${src}F7: время часов ≈ ${yr}-${b[4]}-${b[5]} ${b[6]}:${b[7]}:${b[8]}`);
+    log(`  ↳ ${src}F7: время часов ≈ ${yr}-${b[4]}-${b[5]} ${b[6]}:${b[7]}, HR min/max=${b[9]}/${b[10]}`);
   }
   else if(op===0xE5 && b.length===4){
-    if(b[2]!==0x00){
-      // известный артефакт фрагментации: "E5 11" + "A2 64" склеились
-      log(`  ↳ ${src}E5-фрагмент (пропуск HR): ${hex(b)}`);
-      return;
-    }
     const mode=b[1], hr=b[3];
     if(hr>=40 && hr<=200) onHR(hr, mode);
     else log(`  ↳ ${src}E5 mode=0x${mode.toString(16)}: bpm=${hr} вне диапазона`);
+  }
+  else if(op===0xE5 && b.length===2){
+    log(`  ↳ ${src}E5: отметка "режим 0x${b[1].toString(16)}" без значения (сенсор ещё греется)`);
   }
   else if(op===0xB1 && b.length===18){
     // раскладка предположительная: последние 2 байта BE = шаги
