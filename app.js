@@ -77,6 +77,10 @@ const KNOWN_LEN = { 0xA2: 2, 0xA3: 8, 0xF7: 9 };
 function expectedLength(buf){
   const op = buf[0];
   if(op in KNOWN_LEN) return KNOWN_LEN[op];
+  if(op === 0xB1){
+    if(buf.length < 2) return null;
+    return 18; // realtime steps — та же раскладка, что и у B2-истории
+  }
   if(op === 0xB2){
     if(buf.length < 2) return null; // нужно больше данных, чтобы понять тип
     if(buf[1] === 0xFD) return 3;             // терминатор истории "B2 FD F5"
@@ -134,6 +138,11 @@ function decodePacket(b, uuid){
     log(`  ↳ ${src}A3: время часов = ${year}-${pad(b[3])}-${pad(b[4])} ${pad(b[5])}:${pad(b[6])}:${pad(b[7])}`);
   }
   if(op===0xB1) log(`  ↳ ${src}B1: realtime steps packet`);
+  if(op===0xB1 && b.length===18){
+    const year=(b[1]<<8)|b[2], month=b[3], day=b[4], hour=b[5];
+    const val = (b[6]<<8)|b[7];
+    log(`  ↳ ${src}B1 realtime: ${year}-${pad(month)}-${pad(day)} ${pad(hour)}:xx → счётчик=${val}`);
+  }
   if(op===0xB2){
     if(b.length===18){
       const year=(b[1]<<8)|b[2], month=b[3], day=b[4], hour=b[5];
