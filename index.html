@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
   <meta name="theme-color" content="#111827">
   <link rel="manifest" href="manifest.json">
-  <title>KW66 Lab v2.2</title>
+  <title>KW66 Lab v2.3</title>
   <style>
     :root{color-scheme:dark;font-family:system-ui,-apple-system,Segoe UI,sans-serif}
     body{margin:0;background:#0b1020;color:#eef2ff}
@@ -27,7 +27,7 @@
 </head>
 <body>
 <main>
-  <h1>KW66 Lab <span class="muted">v2.2</span></h1>
+  <h1>KW66 Lab <span class="muted">v2.3</span></h1>
   <div class="muted">GloryFit BLE / Command Lab</div>
 
   <section class="card">
@@ -66,6 +66,8 @@
 
   <section class="card">
     <h2>4. Custom command</h2>
+    <div class="muted" style="margin-bottom:8px">Куда отправить (если найдено несколько TX-каналов):</div>
+    <select id="txSelect" style="width:100%;background:#0b1020;color:#fff;border:1px solid #35415e;border-radius:8px;padding:8px;margin-bottom:8px"></select>
     <input id="custom" placeholder="Например: A2 или E5 00">
     <div class="row"><button id="sendCustom" class="warn" disabled>Отправить HEX</button></div>
     <div class="muted">Команда отправляется в выбранную TX characteristic. Используй только команды, которые понимаешь.</div>
