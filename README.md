@@ -1,4 +1,4 @@
-# KW66 Lab v2 — PWA
+# KW66 Lab v2.1 — PWA
 
 PWA для диагностики и исследования IMILAB KW66 / GloryFit по Bluetooth Low Energy.
 

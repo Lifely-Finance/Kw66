@@ -17,7 +17,8 @@ function updateBrowser(){
  diag('Web Bluetooth доступен');diag('HTTPS / Secure Context OK');return true;
 }
 function onDisconnect(){log('GATT отключён');setStatus('Отключено','bad');server=null;writeChar=null;notifyChar=null;setConnected(false);}
-function characteristicSummary(c){return `${c.uuid} [${[...c.properties].join(', ')}]`;}
+function propertyList(c){const p=c.properties||{};return ['broadcast','read','writeWithoutResponse','write','notify','indicate','authenticatedSignedWrites','reliableWrite','writableAuxiliaries'].filter(k=>p[k]).join(', ');}
+function characteristicSummary(c){return `${c.uuid} [${propertyList(c)}]`;}
 async function inspectServices(){
  const services=await server.getPrimaryServices(); log(`Найдено primary services: ${services.length}`);
  let profileFound=false;
@@ -28,7 +29,7 @@ async function inspectServices(){
    const chars=await s.getCharacteristics();
    for(const c of chars){
      log(`CHAR ${characteristicSummary(c)}`);
-     const row=document.createElement('div');row.className='char';row.textContent=`${c.uuid} · ${[...c.properties].join(', ')}`;block.appendChild(row);
+     const row=document.createElement('div');row.className='char';row.textContent=`${c.uuid} · ${propertyList(c)}`;block.appendChild(row);
      const id=norm(c.uuid);
      if(id===UUID.write || id===UUID.write5){writeChar=c;lastService=s;profileFound=true;}
      if(id===UUID.notify || id===UUID.notify5){notifyChar=c;lastService=s;profileFound=true;}
