@@ -78,7 +78,7 @@ function record(direction, bytes, uuid){
   }
 }
 function setConnected(v){
-  ["battery","steps","sendCustom"].forEach(id=>$(id).disabled=!v);
+  ["battery","steps","sendCustom","sendWatchText"].forEach(id=>$(id).disabled=!v);
   $("hrReq").disabled=!v;
   $("recStart").disabled=!v;
   $("stressToggle").disabled=!v;
@@ -177,6 +177,43 @@ async function readBattery(){
   }catch(e){ log(`Battery ERROR: ${e.message}`); }
 }
 
+/* ---------- 0xC5: произвольный текст на часы ----------
+   Реконструировано из btsnoop_hci.log официального приложения (не проверено
+   на реальном железе). Наблюдалась такая картина при пуше тестового
+   уведомления:
+     TX (33F1): C5 00 <до 18 байт> , C5 01 <до 18 байт> , … , C5 FD
+     RX (33F2): C5 00 , C5 01 , … , C5 FD <2 байта статуса>
+   Полезная нагрузка — сплошной поток UTF-16BE, порезанный на куски БЕЗ
+   выравнивания по границе символа (т.е. просто нарезаем массив байт кусками
+   по 18, не думая о символах) — код часов сам досклеивает поток.
+   seq идёт 0,1,2,… и не должен долетать до 0xFD (это терминатор). */
+function utf16beBytes(str){
+  const out=new Uint8Array(str.length*2);
+  for(let i=0;i<str.length;i++){
+    const cu=str.charCodeAt(i);
+    out[i*2]=(cu>>8)&0xFF;
+    out[i*2+1]=cu&0xFF;
+  }
+  return out;
+}
+async function sendWatchText(text){
+  if(!text) return;
+  const payload=utf16beBytes(text);
+  const CHUNK=18;
+  let seq=0;
+  for(let off=0; off<payload.length; off+=CHUNK){
+    const chunk=payload.slice(off, off+CHUNK);
+    const packet=new Uint8Array(2+chunk.length);
+    packet[0]=0xC5; packet[1]=seq;
+    packet.set(chunk,2);
+    await send(packet);
+    seq=(seq+1)%0xFD; // 0xFD зарезервирован под терминатор
+    await sleep(40);  // темп между кусками — как в оригинальном логе
+  }
+  await send([0xC5,0xFD]);
+  log(`Текст отправлен на часы (${payload.length} байт полезной нагрузки, ${Math.ceil(payload.length/CHUNK)} кусков).`);
+}
+
 /* ---------- сборка фрагментов и декодинг ---------- */
 function expectedLength(buf){
   const op=buf[0];
@@ -272,6 +309,12 @@ function decodePacket(b, uuid){
   }
   else if(op===0xB2 && b.length>=2 && b[1]===0xFD){
     log(`  ↳ ${src}B2 FD ${b[2].toString(16)}: история пуста / конец передачи`);
+  }
+  else if(op===0xC5 && b.length>=2 && b[1]===0xFD){
+    log(`  ↳ ${src}C5 FD: часы подтвердили приём текста (статус ${hex(b.slice(2))||"—"})`);
+  }
+  else if(op===0xC5 && b.length===2){
+    log(`  ↳ ${src}C5: часы квитировали кусок #${b[1]}`);
   }
 }
 
@@ -709,6 +752,7 @@ $("battery").onclick=readBattery;
 $("steps").onclick=()=>send([0xB2,0xFA]).catch(e=>log(`Steps ERROR: ${e.message}`));
 $("hrReq").onclick=()=>send([0xE5,0x00]).catch(e=>log(`HR ERROR: ${e.message}`));
 $("sendCustom").onclick=()=>{ try{ send(hexToBytes($("custom").value)); }catch(e){ log(`CUSTOM ERROR: ${e.message}`); } };
+$("sendWatchText").onclick=()=>{ sendWatchText($("watchText").value).catch(e=>log(`TEXT ERROR: ${e.message}`)); };
 $("recStart").onclick=()=>recovery.start();
 $("recCancel").onclick=()=>recovery.cancel();
 $("stressToggle").onclick=()=>stress.toggle();

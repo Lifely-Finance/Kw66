@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
   <meta name="theme-color" content="#111827">
   <link rel="manifest" href="manifest.json">
-  <title>KW66 Lab v3.1</title>
+  <title>KW66 Lab v3.2</title>
   <style>
     :root{color-scheme:dark;font-family:system-ui,-apple-system,Segoe UI,sans-serif}
     body{margin:0;background:#0b1020;color:#eef2ff}
@@ -139,6 +139,21 @@
       </div>
     </div>
     <div class="row"><button id="sendCustom" class="warn" disabled>Отправить HEX</button></div>
+  </section>
+
+  <section class="card">
+    <h2>6b. Текст на часы <span class="muted">— найдено в btsnoop: opcode 0xC5</span></h2>
+    <div class="muted" style="margin-bottom:6px">
+      Реконструировано из реального лога GloryFit: телефон режет UTF-16BE строку на куски
+      по ≤18 байт (<code>C5 &lt;seq&gt; …данные…</code>), часы квитируют каждый кусок
+      <code>C5 &lt;seq&gt;</code>, конец — <code>C5 FD</code> / <code>C5 FD &lt;status&gt;</code>.
+      Не проверено на железе — если экран не покажет текст, пришли новый btsnoop с включённым
+      логом именно в момент показа настоящего уведомления, сверим побайтово.
+    </div>
+    <textarea id="watchText" placeholder="Текст для отображения на часах…">Привет с телефона!</textarea>
+    <div class="row" style="margin-top:8px">
+      <button id="sendWatchText" class="warn" disabled>Отправить текст (0xC5)</button>
+    </div>
   </section>
 
   <section class="card">
