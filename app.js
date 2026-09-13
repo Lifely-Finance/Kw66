@@ -1,3 +1,10 @@
+/* ============================================================
+   KW66 Lab v3.0
+   GloryFit BLE: command lab + HR analytics + fuzzer + btsnoop
+   ============================================================ */
+"use strict";
+
+/* ---------- константы ---------- */
 const UUID = {
   service4: "000055ff-0000-1000-8000-00805f9b34fb",
   service5: "000056ff-0000-1000-8000-00805f9b34fb",
@@ -15,22 +22,26 @@ const LABELS = {
   [UUID.rxAlt]: "ALT", [UUID.txAlt]: "ALT",
   [UUID.battery]: "BAT"
 };
-function labelFor(uuid){ return LABELS[uuid?.toLowerCase()] || uuid; }
+// ожидаемые длины пакетов по opcode
+const KNOWN_LEN = { 0xA2: 2, 0xA3: 8, 0xE5: 4, 0xF7: 9 };
+// периодический «фон» — для фаззера и статистики не считается ответом
+const PERIODIC_OPS = new Set([0xA2, 0xF7, 0xB1]);
+const GF_KEYS = ["55ff","56ff","33f1","33f2","34f1","34f2","b003","b004","2a19"];
 
-let device=null, server=null, txChars=[], rx=null, batteryChar=null, activeTx=null;
-let logRows=[], rxCount=0;
-// буфер незавершённых фрагментов, отдельный на каждую characteristic (по uuid)
-let rxBuffers={};
+/* ---------- состояние ---------- */
+let device=null, server=null, txChars=[], rxCharsAll=[], batteryChar=null, activeTx=null;
+let logRows=[], rxCount=0, hrCount=0, rxBuffers={};
+let hrHistory=[];            // {t, hr}
+let lastSteps=null, lastStepsT=0;
+let rxFeed=[];               // {t, hex, op} — последние RX для фаззера
+let currentHR=null;
 
+/* ---------- утилиты ---------- */
 const $ = id => document.getElementById(id);
-function now(){return new Date().toLocaleTimeString();}
-function log(s){
-  const line=`[${now()}] ${s}`;
-  $("log").textContent += ( $("log").textContent ? "\n" : "" ) + line;
-  $("log").scrollTop=$("log").scrollHeight;
-}
-function hex(data){
-  return [...new Uint8Array(data)].map(x=>x.toString(16).padStart(2,"0").toUpperCase()).join(" ");
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+function now(){ return new Date().toLocaleTimeString(); }
+function hex(bytes){
+  return [...bytes].map(x=>x.toString(16).padStart(2,"0").toUpperCase()).join(" ");
 }
 function hexToBytes(s){
   const clean=s.replace(/0x/gi,"").replace(/[^0-9a-f]/gi,"");
@@ -39,243 +50,636 @@ function hexToBytes(s){
   for(let i=0;i<out.length;i++) out[i]=parseInt(clean.slice(i*2,i*2+2),16);
   return out;
 }
-function setEnabled(v){
-  ["battery","hr","steps","sendCustom"].forEach(id=>$(id).disabled=!v);
+function labelFor(uuid){ return LABELS[uuid?.toLowerCase()] || uuid; }
+function looksLike(uuid, target){ return uuid.toLowerCase()===target.toLowerCase(); }
+function log(s){
+  const line=`[${now()}] ${s}`;
+  $("log").textContent += ($("log").textContent ? "\n" : "") + line;
+  $("log").scrollTop=$("log").scrollHeight;
 }
-function record(direction, bytes, sourceUuid){
-  const value=hex(bytes.buffer || bytes);
-  logRows.push({time:new Date().toISOString(),direction,hex:value,source:sourceUuid?labelFor(sourceUuid):undefined});
+function record(direction, bytes, uuid){
+  const value=hex(bytes);
+  logRows.push({time:new Date().toISOString(), direction, hex:value, source:uuid?labelFor(uuid):undefined});
   if(direction==="RX"){
-    rxCount++; $("rxCount").textContent=rxCount; $("lastRx").textContent=value;
-  } else $("lastTx").textContent=value;
+    rxCount++; $("rxCount") && ($("rxCount").textContent=rxCount);
+  }
 }
-function looksLike(uuid, target){return uuid.toLowerCase()===target.toLowerCase();}
+function setConnected(v){
+  ["battery","steps","sendCustom"].forEach(id=>$(id).disabled=!v);
+  $("hrReq").disabled=!v;
+  $("recStart").disabled=!v;
+  $("stressToggle").disabled=!v;
+}
+
+/* ---------- подключение ---------- */
 function characteristicProps(c){
-  const p=c.properties || {};
-  const out=[];
+  const p=c.properties||{}, out=[];
   if(p.read) out.push("read");
   if(p.write) out.push("write");
   if(p.writeWithoutResponse) out.push("writeWithoutResponse");
   if(p.notify) out.push("notify");
   if(p.indicate) out.push("indicate");
-  return out.join(", ") || "—";
-}
-function findAllTx(candidates){
-  return candidates.filter(c=>c.properties?.write || c.properties?.writeWithoutResponse);
-}
-function findAllRx(candidates){
-  return candidates.filter(c=>c.properties?.notify || c.properties?.indicate);
-}
-
-// --- Сборка фрагментированных пакетов ---
-// Каждой характеристике соответствует свой буфер, т.к. фрагменты одного
-// логического пакета могут прийти двумя отдельными notify-эвентами
-// (пример из реального лога: "A2" и "64" пришли раздельно).
-// Известные форматы (opcode -> ожидаемая длина); B2 — переменной длины,
-// поэтому для него определяем длину по второму байту.
-const KNOWN_LEN = { 0xA2: 2, 0xA3: 8, 0xE5: 4, 0xF7: 9 };
-function expectedLength(buf){
-  const op = buf[0];
-  if(op in KNOWN_LEN) return KNOWN_LEN[op];
-  if(op === 0xB1){
-    if(buf.length < 2) return null;
-    return 18; // realtime steps — та же раскладка, что и у B2-истории
-  }
-  if(op === 0xB2){
-    if(buf.length < 2) return null; // нужно больше данных, чтобы понять тип
-    if(buf[1] === 0xFD) return 3;             // терминатор истории "B2 FD F5"
-    if(buf[1] === 0x07) return 18;            // запись истории (год начинается с 0x07)
-    return 2;                                  // ack-подобные короткие ответы
-  }
-  return null; // неизвестный opcode — сбрасываем как есть, без буферизации
-}
-function pushToBuffer(uuid, bytes){
-  const key = uuid || "unknown";
-  const prev = rxBuffers[key] || new Uint8Array(0);
-  const merged = new Uint8Array(prev.length + bytes.length);
-  merged.set(prev,0); merged.set(bytes, prev.length);
-  rxBuffers[key] = merged;
-  flushBuffer(key, uuid);
-}
-function flushBuffer(key, uuid){
-  let buf = rxBuffers[key];
-  while(buf && buf.length){
-    const need = expectedLength(buf);
-    if(need === null){
-      // либо неизвестный opcode, либо нужно больше байт для B2/E5 —
-      // если буфер уже подозрительно длинный, сбрасываем как "unknown blob"
-      if(buf.length >= 20){
-        emitPacket(buf, uuid, true);
-        buf = new Uint8Array(0);
-      }
-      break;
-    }
-    if(buf.length < need) break; // ждём остальные фрагменты
-    emitPacket(buf.slice(0, need), uuid, false);
-    buf = buf.slice(need);
-  }
-  rxBuffers[key] = buf;
-}
-function emitPacket(bytes, uuid, isUnknownBlob){
-  record("RX", bytes, uuid);
-  if(isUnknownBlob) log(`  ⚠ несобранный фрагмент (${labelFor(uuid)}): ${hex(bytes)}`);
-  else decodePacket(bytes, uuid);
-}
-
-function decodePacket(b, uuid){
-  if(!b.length) return;
-  const src = uuid ? `[${labelFor(uuid)}] ` : "";
-  const op=b[0];
-  if(op===0xE5 && b.length===4){
-    const mode=b[1], hr=b[3];
-    const modeLabel = mode===0x11 ? "идёт измерение" : (mode===0x00 ? "финальное значение" : `режим 0x${mode.toString(16)}`);
-    if(hr>=40 && hr<=200) log(`  ↳ ${src}E5 (${modeLabel}): пульс = ${hr} bpm`);
-    else log(`  ↳ ${src}E5: byte[3]=${hr} вне диапазона HR (${modeLabel})`);
-  }
-  if(op===0xA2) log(`  ↳ ${src}A2: батарея = ${b[1]}%`);
-  if(op===0xF7 && b.length===9){
-    const year=(b[2]<<8)|b[3];
-    log(`  ↳ ${src}F7 (sub ${b[1]}): время часов ≈ ${year}-${pad(b[4])}-${pad(b[5])} ${pad(b[6])}:${pad(b[7])}`);
-  }
-  if(op===0xA3 && b.length>=8){
-    const year=(b[1]<<8)|b[2];
-    log(`  ↳ ${src}A3: время часов = ${year}-${pad(b[3])}-${pad(b[4])} ${pad(b[5])}:${pad(b[6])}:${pad(b[7])}`);
-  }
-  if(op===0xB1) log(`  ↳ ${src}B1: realtime steps packet`);
-  if(op===0xB1 && b.length===18){
-    const year=(b[1]<<8)|b[2], month=b[3], day=b[4], hour=b[5];
-    const val = (b[6]<<8)|b[7];
-    log(`  ↳ ${src}B1 realtime: ${year}-${pad(month)}-${pad(day)} ${pad(hour)}:xx → счётчик=${val}`);
-  }
-  if(op===0xB2){
-    if(b.length===18){
-      const year=(b[1]<<8)|b[2], month=b[3], day=b[4], hour=b[5];
-      const val = (b[6]<<8)|b[7];
-      log(`  ↳ ${src}B2 история: ${year}-${pad(month)}-${pad(day)} ${pad(hour)}:00 → значение=${val} (сырые байты: ${hex(b.slice(6))})`);
-    } else if(b.length===3 && b[1]===0xFD){
-      log(`  ↳ ${src}B2: конец выгрузки истории`);
-    } else {
-      log(`  ↳ ${src}B2: короткий ответ/ack (${hex(b)})`);
-    }
-  }
-}
-function pad(n){ return n.toString().padStart(2,"0"); }
-
-async function subscribe(c){
-  if(!c) return;
-  if(c.properties.notify || c.properties.indicate){
-    await c.startNotifications();
-    c.addEventListener("characteristicvaluechanged", e=>{
-      const bytes=new Uint8Array(e.target.value.buffer.slice(0));
-      pushToBuffer(c.uuid, bytes);
-    });
-    log(`Уведомления включены: ${c.uuid} [${labelFor(c.uuid)}]`);
-  }
-}
-async function send(bytes, txOverride){
-  const t = txOverride || activeTx;
-  if(!t) throw new Error("TX characteristic не найдена");
-  const data=bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
-  if(t.properties.writeWithoutResponse && !t.properties.write){
-    await t.writeValueWithoutResponse(data);
-  } else {
-    await t.writeValue(data);
-  }
-  record("TX",data, t.uuid);
-  log(`TX → [${labelFor(t.uuid)}] ${hex(data)}`);
+  return out.join(", ")||"—";
 }
 function renderTxSelect(){
-  const sel = $("txSelect");
-  if(!sel) return;
-  sel.innerHTML = txChars.map((c,i)=>`<option value="${i}">${labelFor(c.uuid)} — ${c.uuid}</option>`).join("");
-  sel.onchange = ()=>{ activeTx = txChars[Number(sel.value)]; log(`Активный TX переключён на [${labelFor(activeTx.uuid)}]`); };
+  const sel=$("txSelect"); sel.innerHTML="";
+  txChars.forEach((c,i)=>{
+    const o=document.createElement("option");
+    o.value=i; o.textContent=`${labelFor(c.uuid)} ${c.uuid.slice(0,8)}… [${characteristicProps(c)}]`;
+    if(c===activeTx) o.selected=true;
+    sel.appendChild(o);
+  });
+  sel.onchange=()=>{ activeTx=txChars[+sel.value]; log(`TX канал: ${labelFor(activeTx.uuid)}`); };
+}
+async function subscribe(c){
+  await c.startNotifications();
+  c.addEventListener("characteristicvaluechanged", e=>{
+    const v=e.target.value;
+    pushToBuffer(c.uuid, new Uint8Array(v.buffer.slice(v.byteOffset, v.byteOffset+v.byteLength)));
+  });
 }
 async function connect(){
-  if(!navigator.bluetooth){log("ОШИБКА: Web Bluetooth недоступен в этом браузере.");return;}
+  if(!navigator.bluetooth){ log("Web Bluetooth недоступен. Нужен Chrome/Android или Bluefy на iOS."); return; }
   try{
-    log("Открываю системный BLE-выбор устройства.");
+    log("Поиск устройства…");
     device=await navigator.bluetooth.requestDevice({
       acceptAllDevices:true,
-      optionalServices:[UUID.service4,UUID.service5,UUID.battery]
+      optionalServices:[UUID.service4, UUID.service5, UUID.battery]
     });
-    $("device").textContent=`Выбрано: ${device.name||"(без имени)"} (${device.id})`;
     device.addEventListener("gattserverdisconnected",()=>{
       log("GATT disconnected.");
-      server=null; txChars=[]; activeTx=null; rx=null; batteryChar=null; rxBuffers={}; setEnabled(false);
+      server=null; txChars=[]; rxCharsAll=[]; activeTx=null; batteryChar=null; rxBuffers={};
+      setConnected(false);
+      $("device").textContent="Отключено";
     });
     server=await device.gatt.connect();
-    log("GATT connected.");
+    log(`GATT connected: ${device.name||"(без имени)"}`);
+    $("device").textContent=`Выбрано: ${device.name||"(без имени)"} (${device.id})`;
     const services=await server.getPrimaryServices();
-    log(`Найдено primary services: ${services.length}`);
-
     const chars=[];
     for(const s of services){
       log(`SERVICE ${s.uuid}`);
-      const cs=await s.getCharacteristics();
-      for(const c of cs){
-        chars.push(c);
-        log(`CHAR ${c.uuid} [${characteristicProps(c)}]`);
-      }
+      for(const c of await s.getCharacteristics()){ chars.push(c); log(`CHAR ${c.uuid} [${characteristicProps(c)}]`); }
     }
-
-    const txCandidates=chars.filter(c=>looksLike(c.uuid,UUID.tx4)||looksLike(c.uuid,UUID.tx5)||looksLike(c.uuid,UUID.txAlt));
-    const rxCandidates=chars.filter(c=>looksLike(c.uuid,UUID.rx4)||looksLike(c.uuid,UUID.rx5)||looksLike(c.uuid,UUID.rxAlt));
-    txChars=findAllTx(txCandidates);
-    const rxAll=findAllRx(rxCandidates);
+    const txCand=chars.filter(c=>[UUID.tx4,UUID.tx5,UUID.txAlt].some(u=>looksLike(c.uuid,u)));
+    const rxCand=chars.filter(c=>[UUID.rx4,UUID.rx5,UUID.rxAlt].some(u=>looksLike(c.uuid,u)));
+    txChars=txCand.filter(c=>c.properties?.write||c.properties?.writeWithoutResponse);
+    rxCharsAll=rxCand.filter(c=>c.properties?.notify||c.properties?.indicate);
     batteryChar=chars.find(c=>looksLike(c.uuid,UUID.battery));
-
-    activeTx = txChars[0] || null;
+    activeTx=txChars[0]||null;
     $("txChar").textContent=txChars.map(c=>labelFor(c.uuid)).join(", ")||"не найден";
-    $("rxChar").textContent=rxAll.map(c=>labelFor(c.uuid)).join(", ")||"не найден";
+    $("rxChar").textContent=rxCharsAll.map(c=>labelFor(c.uuid)).join(", ")||"не найден";
     renderTxSelect();
-
-    if(txChars.length || rxAll.length){
-      $("profile").innerHTML='<span class="ok">GloryFit распознан</span>';
-      log(`Профиль GloryFit распознан. TX-каналов: ${txChars.length}, RX-каналов: ${rxAll.length}`);
-    } else {
-      $("profile").innerHTML='<span class="bad">GloryFit не найден</span>';
-    }
-
-    // Подписываемся на ВСЕ найденные notify-каналы, а не только на первый —
-    // ответ на команду (например HR) может прийти на другую характеристику,
-    // чем та, куда ушёл запрос.
-    for(const c of rxAll) await subscribe(c);
-    if(batteryChar?.properties?.notify && !rxAll.length){
-      await subscribe(batteryChar);
-    }
-
-    setEnabled(txChars.length>0);
+    for(const c of rxCharsAll) await subscribe(c);
+    if(batteryChar?.properties?.notify && !rxCharsAll.length) await subscribe(batteryChar);
+    setConnected(txChars.length>0);
+    log(`Профиль GloryFit: TX=${txChars.length}, RX=${rxCharsAll.length}`);
   }catch(e){
     log(`ОШИБКА: ${e.name||"Error"}: ${e.message||e}`);
   }
+}
+async function send(bytes){
+  if(!activeTx) throw new Error("Нет TX-канала");
+  const u8=bytes instanceof Uint8Array?bytes:new Uint8Array(bytes);
+  await activeTx.writeValue(u8);
+  record("TX", u8, activeTx.uuid);
+  log(`TX → ${hex(u8)}`);
 }
 async function readBattery(){
   try{
     if(batteryChar?.properties?.read){
       const v=await batteryChar.readValue();
-      const b=new Uint8Array(v.buffer.slice(0));
-      log(`BATTERY read ← ${hex(b.buffer)}`);
-      record("RX",b, batteryChar.uuid);
+      const b=new Uint8Array(v.buffer.slice(v.byteOffset, v.byteOffset+v.byteLength));
+      record("RX", b, batteryChar.uuid);
+      if(b.length>=2 && b[0]===0xA2){ $("batVal").textContent=b[1]; log(`Батарея: ${b[1]}%`); }
     }else await send([0xA2]);
-  }catch(e){log(`Battery ERROR: ${e.message}`);}
+  }catch(e){ log(`Battery ERROR: ${e.message}`); }
 }
-async function disconnect(){
-  try{if(device?.gatt?.connected) device.gatt.disconnect();}catch{}
+
+/* ---------- сборка фрагментов и декодинг ---------- */
+function expectedLength(buf){
+  const op=buf[0];
+  if(op in KNOWN_LEN) return KNOWN_LEN[op];
+  if(op===0xB1) return buf.length<2?null:18;        // realtime steps
+  if(op===0xB2){
+    if(buf.length<2) return null;
+    if(buf[1]===0xFD) return 3;                      // терминатор истории (пусто): B2 FD E0/F5
+    if(buf[1]===0x07) return 18;                     // запись истории
+    return 2;                                        // короткие ack-подобные
+  }
+  return null;
 }
+function pushToBuffer(uuid, bytes){
+  const key=uuid||"unknown";
+  const prev=rxBuffers[key]||new Uint8Array(0);
+  const merged=new Uint8Array(prev.length+bytes.length);
+  merged.set(prev,0); merged.set(bytes,prev.length);
+  rxBuffers[key]=merged;
+  flushBuffer(key, uuid);
+}
+function flushBuffer(key, uuid){
+  let buf=rxBuffers[key];
+  while(buf && buf.length){
+    const need=expectedLength(buf);
+    if(need===null){
+      if(buf.length>=20){ emitPacket(buf, uuid, true); buf=new Uint8Array(0); }
+      break;
+    }
+    if(buf.length<need) break;
+    emitPacket(buf.slice(0,need), uuid, false);
+    buf=buf.slice(need);
+  }
+  rxBuffers[key]=buf;
+}
+function emitPacket(bytes, uuid, isUnknown){
+  record("RX", bytes, uuid);
+  rxFeed.push({t:Date.now(), hex:hex(bytes), op:bytes[0]});
+  if(rxFeed.length>800) rxFeed.splice(0, rxFeed.length-800);
+  decodePacket(bytes, uuid);
+}
+function decodePacket(b, uuid){
+  const src=uuid?`[${labelFor(uuid)}] `:"";
+  const op=b[0];
+  if(op===0xA2 && b.length>=2){
+    $("batVal").textContent=b[1];
+    log(`  ↳ ${src}A2: батарея = ${b[1]}%`);
+  }
+  else if(op===0xF7 && b.length===9){
+    const yr=(b[2]<<8)|b[3];
+    log(`  ↳ ${src}F7: время часов ≈ ${yr}-${b[4]}-${b[5]} ${b[6]}:${b[7]}:${b[8]}`);
+  }
+  else if(op===0xE5 && b.length===4){
+    if(b[2]!==0x00){
+      // известный артефакт фрагментации: "E5 11" + "A2 64" склеились
+      log(`  ↳ ${src}E5-фрагмент (пропуск HR): ${hex(b)}`);
+      return;
+    }
+    const mode=b[1], hr=b[3];
+    if(hr>=40 && hr<=200) onHR(hr, mode);
+    else log(`  ↳ ${src}E5 mode=0x${mode.toString(16)}: bpm=${hr} вне диапазона`);
+  }
+  else if(op===0xB1 && b.length===18){
+    // раскладка предположительная: последние 2 байта BE = шаги
+    const steps=(b[16]<<8)|b[17];
+    lastSteps=steps; lastStepsT=Date.now();
+    $("stepsVal").textContent=steps;
+    log(`  ↳ ${src}B1: шаги ≈ ${steps} (raw ${hex(b)})`);
+  }
+  else if(op===0xB2 && b.length>=2 && b[1]===0xFD){
+    log(`  ↳ ${src}B2 FD ${b[2].toString(16)}: история пуста / конец передачи`);
+  }
+}
+
+/* ---------- живой пульс ---------- */
+function onHR(hr, mode){
+  const t=Date.now();
+  currentHR=hr;
+  hrHistory.push({t, hr});
+  const cutoff=t-10*60*1000;
+  while(hrHistory.length && hrHistory[0].t<cutoff) hrHistory.shift();
+  hrCount++;
+  $("hrNow").textContent=hr+" bpm";
+  $("hrCount").textContent=hrCount;
+  const win=hrHistory.filter(s=>s.t>t-5*60*1000);
+  const mn=Math.min(...win.map(s=>s.hr)), mx=Math.max(...win.map(s=>s.hr));
+  const avg=Math.round(win.reduce((a,s)=>a+s.hr,0)/win.length);
+  $("hrMinMax").textContent=`${mn} / ${mx}`;
+  $("hrAvg").textContent=avg+" bpm";
+  const pill=$("hrPill");
+  pill.textContent="поток активен";
+  pill.className="pill run";
+  drawChart();
+  recovery.onHR(hr, t);
+  lie.onHR(hr, t);
+}
+
+let pillTimer=setInterval(()=>{
+  if(currentHR && Date.now()-hrHistory[hrHistory.length-1]?.t>5000){
+    const pill=$("hrPill"); pill.textContent="поток пропал"; pill.className="pill hot";
+  }
+},2000);
+
+function drawChart(){
+  const c=$("hrChart"); if(!c) return;
+  const dpr=window.devicePixelRatio||1;
+  const w=c.clientWidth, h=c.clientHeight;
+  if(!w||!h) return;
+  if(c.width!==Math.round(w*dpr)){ c.width=Math.round(w*dpr); c.height=Math.round(h*dpr); }
+  const ctx=c.getContext("2d");
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+  ctx.clearRect(0,0,w,h);
+  const SPAN=5*60*1000, tEnd=Date.now(), tStart=tEnd-SPAN;
+  let vals=hrHistory.filter(s=>s.t>=tStart);
+  if(vals.length<2){
+    ctx.fillStyle="#9ca3af"; ctx.font="13px system-ui";
+    ctx.fillText("Нет данных — запусти замер пульса на часах", 12, h/2);
+    return;
+  }
+  let mn=Math.min(...vals.map(s=>s.hr)), mx=Math.max(...vals.map(s=>s.hr));
+  mn=Math.max(40, mn-10); mx=Math.min(180, mx+10);
+  const yOf=hr=>h-((hr-mn)/(mx-mn))*(h-24)-12;
+  const xOf=t=>((t-tStart)/SPAN)*w;
+  ctx.strokeStyle="#1e2a44"; ctx.fillStyle="#4b5878"; ctx.font="10px ui-monospace";
+  for(let g=Math.ceil(mn/10)*10; g<=mx; g+=10){
+    const y=yOf(g);
+    ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(w,y); ctx.stroke();
+    ctx.fillText(g+"", 4, y-2);
+  }
+  ctx.strokeStyle="#60a5fa"; ctx.lineWidth=2; ctx.beginPath();
+  vals.forEach((s,i)=>{ const x=xOf(s.t), y=yOf(s.hr); i?ctx.lineTo(x,y):ctx.moveTo(x,y); });
+  ctx.stroke();
+  const last=vals[vals.length-1];
+  ctx.fillStyle="#6ee7b7"; ctx.beginPath();
+  ctx.arc(xOf(last.t), yOf(last.hr), 4, 0, Math.PI*2); ctx.fill();
+  ctx.fillStyle="#eef2ff"; ctx.font="bold 12px system-ui";
+  ctx.fillText(last.hr+" bpm", Math.min(xOf(last.t)+8, w-60), yOf(last.hr)+4);
+}
+window.addEventListener("resize", drawChart);
+
+/* ---------- тест восстановления (перетрен) ---------- */
+const recovery={
+  state:"idle", t0:0, firstHr:null, endHr:null, timer:null,
+  start(){
+    if(this.state==="run") return;
+    this.state="run"; this.t0=Date.now(); this.firstHr=null; this.endHr=null;
+    $("recPill").textContent="идёт тест"; $("recPill").className="pill run";
+    $("recVerdict").textContent="—"; $("recDrop").textContent="—";
+    $("recPeak").textContent="—"; $("recAfter").textContent="—";
+    $("recStart").disabled=true; $("recCancel").disabled=false;
+    this.timer=setInterval(()=>{
+      const el=Math.floor((Date.now()-this.t0)/1000);
+      $("recTimer").textContent=`Прошло ${el}/60 с` + (this.firstHr?` · пик ${this.firstHr} bpm`:"") + " · стой спокойно, не ходи";
+      if(el>=60) this.finish();
+    },250);
+    log("Тест восстановления: старт. Постой неподвижно 60 с.");
+  },
+  onHR(hr){
+    if(this.state!=="run") return;
+    if(this.firstHr===null) this.firstHr=hr;
+    this.endHr=hr;
+    $("recPeak").textContent=this.firstHr+" bpm";
+    $("recAfter").textContent=hr+" bpm";
+  },
+  finish(){
+    clearInterval(this.timer);
+    this.state="done";
+    const drop=this.firstHr!==null&&this.endHr!==null ? this.firstHr-this.endHr : null;
+    $("recDrop").textContent=drop!==null?("−"+drop+" bpm"):"—";
+    let v, cls;
+    if(drop===null){ v="мало данных"; }
+    else if(drop>=30){ v="Отличная форма ✓"; cls="ok"; }
+    else if(drop>=20){ v="Хорошо"; cls="ok"; }
+    else if(drop>=12){ v="Средне — лёгкая нагрузка допустима"; cls="warn-t"; }
+    else { v="Не восстановился — отдых сегодня"; cls="bad"; }
+    $("recVerdict").textContent=v; $("recVerdict").className="value "+(cls||"");
+    $("recPill").textContent="готов"; $("recPill").className="pill";
+    $("recStart").disabled=false; $("recCancel").disabled=true;
+    $("recTimer").textContent="";
+    log(`Тест восстановления: ${this.firstHr} → ${this.endHr} bpm (−${drop}). ${v}`);
+  },
+  cancel(){
+    clearInterval(this.timer); this.state="idle";
+    $("recPill").textContent="отменён"; $("recPill").className="pill";
+    $("recStart").disabled=false; $("recCancel").disabled=true;
+    $("recTimer").textContent="";
+  }
+};
+
+/* ---------- стресс-монитор v1 ---------- */
+const stress={
+  on:false, lastTrigger:0,
+  toggle(){
+    this.on=!this.on;
+    $("stressToggle").textContent=this.on?"Выключить монитор":"Включить монитор";
+    $("stressPill").textContent=this.on?"вкл":"выкл";
+    $("stressPill").className="pill"+(this.on?" run":"");
+    if(this.on){
+      log("Стресс-монитор вкл: HR>100 3 мин + шаги стоят → дыхание 4-7-8.");
+      this.tick();
+    } else $("stressMsg").textContent="";
+  },
+  tick(){
+    if(!this.on) return;
+    const t=Date.now();
+    const win=hrHistory.filter(s=>s.t>t-3*60*1000);
+    const stepsFresh=(t-lastStepsT)<120000;
+    let msg=`окно ${Math.min(Math.floor((t-(win[0]?.t||t))/1000),180)}/180 с · шаги: ${lastSteps??"нет данных"}${stepsFresh?"":" (устарели)"}`;
+    let alert=false;
+    if(win.length>30){
+      const high=win.filter(s=>s.hr>100).length;
+      const ratio=high/win.length;
+      msg=`HR>100: ${Math.round(ratio*100)}% окна · шаги: ${lastSteps??"—"}${stepsFresh?"":" (устарели)"}`;
+      if(ratio>0.9 && stepsFresh && lastSteps!==null){
+        const s0=this._stepsAt??lastSteps;
+        this._stepsAt=lastSteps;
+        if(lastSteps-s0<=2) alert=true;
+      } else this._stepsAt=lastSteps;
+    }
+    if(alert && t-this.lastTrigger>10*60*1000){
+      this.lastTrigger=t;
+      $("stressMsg").innerHTML='<span class="bad">Похоже на стресс: пульс высокий, движения нет. Начни дыхание.</span>';
+      log("СТРЕСС-ТРИГГЕР: HR высокий + шаги стоят → дыхание 4-7-8");
+      breathe.start();
+    } else if(t-this.lastTrigger>10*60*1000){
+      $("stressMsg").textContent=msg;
+    }
+  }
+};
+setInterval(()=>stress.tick(), 5000);
+
+/* ---------- детектор «вруна» ---------- */
+const lie={
+  state:"idle", base:[], react:[],
+  start(){
+    this.state="base"; this.base=[]; this.react=[];
+    $("lieStart").disabled=true; $("lieAsk").disabled=true;
+    $("lieMsg").textContent="Базовая линия: 10 секунд спокойно…";
+    $("lieVerdict").textContent="—"; $("lieSpike").textContent="—";
+    setTimeout(()=>{
+      if(this.state!=="base") return;
+      this.state="ask";
+      $("lieAsk").disabled=false;
+      const avg=Math.round(this.base.reduce((a,b)=>a+b,0)/this.base.length);
+      const mx=Math.max(...this.base);
+      $("lieBase").textContent=`${avg} / ${mx}`;
+      $("lieMsg").textContent="База готова. Задай вопрос — и сразу жми «Вопрос задан». Измерение реакции: 10 с.";
+      log(`Вруна: база ${avg} bpm (макс ${mx})`);
+    },10000);
+  },
+  onHR(hr){
+    if(this.state==="base") this.base.push(hr);
+    else if(this.state==="react") this.react.push(hr);
+  },
+  ask(){
+    if(this.state!=="ask") return;
+    this.state="react"; this.react=[];
+    $("lieAsk").disabled=true;
+    $("lieMsg").textContent="Смотрим на пульс…";
+    setTimeout(()=>{
+      this.state="done";
+      $("lieStart").disabled=false;
+      if(!this.react.length){ $("lieMsg").textContent="Нет данных — замер на часах остановился?"; return; }
+      const baseAvg=this.base.reduce((a,b)=>a+b,0)/this.base.length;
+      const spike=Math.max(...this.react)-baseAvg;
+      const mx=Math.max(...this.react);
+      $("lieSpike").textContent=`+${Math.round(spike)} bpm (макс ${mx})`;
+      let v,cls;
+      if(spike>=10){ v="Сильная реакция! 😅"; cls="bad"; }
+      else if(spike>=5){ v="Реакция есть 🤨"; cls="warn-t"; }
+      else { v="Спокоен как удав 😐"; cls="ok"; }
+      $("lieVerdict").textContent=v; $("lieVerdict").className="value "+cls;
+      $("lieMsg").textContent="Готово. Шуточный тест — не полиграф 🙂";
+      log(`Вруна: реакция +${Math.round(spike)} bpm. ${v}`);
+    },10000);
+  }
+};
+
+/* ---------- дыхание 4-7-8 ---------- */
+const breathe={
+  phases:[["Вдох…",4000],["Задержка…",7000],["Выдох…",8000]],
+  i:0, running:false, timer:null,
+  start(){
+    $("breathe").classList.add("on");
+    this.running=true; this.i=0;
+    this.next();
+  },
+  next(){
+    if(!this.running) return;
+    const [name,dur]=this.phases[this.i];
+    $("bphase").textContent=name;
+    const circle=$("bcircle");
+    circle.style.transition=`transform ${dur}ms ease-in-out`;
+    // растёт на вдохе, держится, сжимается на выдохе
+    circle.style.transform=`scale(${this.i===0?1.55:this.i===1?1.55:0.7})`;
+    $("bhr").textContent=currentHR?`пульс сейчас: ${currentHR} bpm`:"запусти замер на часах — увидишь эффект";
+    this.timer=setTimeout(()=>{ this.i=(this.i+1)%3; this.next(); }, dur);
+  },
+  stop(){
+    this.running=false; clearTimeout(this.timer);
+    $("breathe").classList.remove("on");
+    $("bcircle").style.transform="scale(1)";
+  }
+};
+
+/* ---------- фаззер ---------- */
+const fuzzer={
+  running:false, stopFlag:false, results:[],
+  parseList(){
+    return $("fuzzList").value.split("\n")
+      .map(l=>l.replace(/#.*$/,"").trim())
+      .filter(l=>l.length>0)
+      .map(l=>{ try{ return {cmd:l, bytes:hexToBytes(l)}; }catch(e){ log(`Фаззер: пропуск строки «${l}» — ${e.message}`); return null; } })
+      .filter(Boolean);
+  },
+  async run(){
+    if(this.running) return;
+    const cmds=this.parseList();
+    if(!cmds.length){ log("Фаззер: список пуст."); return; }
+    if(!activeTx){ log("Фаззер: сначала подключись к часам."); return; }
+    this.running=true; this.stopFlag=false; this.results=[];
+    $("fuzzRun").disabled=true; $("fuzzStop").disabled=false;
+    const winMs=Math.max(300, +$("fuzzWindow").value||1500);
+    const gapMs=Math.max(100, +$("fuzzInterval").value||400);
+    const pill=$("fuzzPill"); pill.textContent="работает"; pill.className="pill run";
+    log(`Фаззер: ${cmds.length} команд, окно ответа ${winMs} мс`);
+    this.render();
+    for(const {cmd,bytes} of cmds){
+      if(this.stopFlag) break;
+      pill.textContent=`→ ${cmd}`;
+      const t0=Date.now();
+      let sendErr=null;
+      try{ await send(bytes); }catch(e){ sendErr=e.message; }
+      await sleep(winMs);
+      const resp=rxFeed.filter(r=>r.t>=t0 && !PERIODIC_OPS.has(r.op));
+      this.results.push({cmd, err:sendErr, count:resp.length, samples:[...new Set(resp.map(r=>r.hex))].slice(0,4)});
+      this.render();
+      await sleep(gapMs);
+    }
+    const found=this.results.filter(r=>r.count>0 && !r.err);
+    pill.textContent=this.stopFlag?"остановлен":`готово, откликов: ${found.length}`;
+    pill.className="pill"+(found.length?" run":"");
+    log(`Фаззер завершён. Команд с откликом: ${found.length}/${this.results.length}`);
+    this.running=false;
+    $("fuzzRun").disabled=false; $("fuzzStop").disabled=true;
+  },
+  stop(){ this.stopFlag=true; },
+  render(){
+    const rows=this.results.map(r=>{
+      const mark=r.err?`<span class="bad">ERR</span>`:r.count>0?`<span class="ok">OK×${r.count}</span>`:`<span class="muted">тишина</span>`;
+      const samp=r.samples&&r.samples.length?`<code>${r.samples.join("<br>")}</code>`:"";
+      return `<tr><td><code>${r.cmd}</code></td><td>${mark}${r.err?`<br><span class="bad">${r.err}</span>`:""}</td><td>${samp}</td></tr>`;
+    }).join("");
+    $("fuzzOut").innerHTML=`<table class="tbl"><tr><th>Команда</th><th>Отклик</th><th>Образцы RX</th></tr>${rows}</table>`;
+  }
+};
+
+/* ---------- btsnoop-парсер ---------- */
+const snoop={
+  rows:[], txAgg:new Map(), parsed:null,
+  async handleFile(file){
+    try{
+      const buf=await file.arrayBuffer();
+      this.parse(buf);
+      this.renderSummary();
+      this.renderRows();
+      $("snoopExport").disabled=false;
+    }catch(e){ log(`Snoop ERROR: ${e.message}`); $("snoopSummary").innerHTML=`<span class="bad">Ошибка парсинга: ${e.message}</span>`; }
+  },
+  u32(dv,o){ return dv.getUint32(o,false); },
+  u16at(a,o){ return (a[o]<<8)|a[o+1]; },
+  u16le(a,o){ return a[o]|(a[o+1]<<8); },   // BLE: L2CAP/ATT поля — little-endian
+  u64raw(dv,o){ return {hi:dv.getUint32(o,false), lo:dv.getUint32(o+4,false)}; },
+  parse(buf){
+    const magic=new Uint8Array(buf,0,8);
+    if(String.fromCharCode(...magic)!=="btsnoop\0") throw new Error("не btsnoop-файл (нет магии btsnoop\\0)");
+    const dv=new DataView(buf);
+    const version=this.u32(dv,8), datalink=this.u32(dv,12);
+    log(`Snoop: версия ${version}, datalink ${datalink}`);
+    let off=16, firstTs=null, rows=[];
+    const handleUuid={};
+    while(off+24<=buf.byteLength){
+      const inclLen=this.u32(dv,off+4), flags=this.u32(dv,off+8);
+      const ts=this.u64raw(dv,off+16);
+      if(firstTs===null) firstTs={...ts};
+      const deltaUs=(ts.hi-firstTs.hi)*4294967296 + (ts.lo-firstTs.lo);
+      const data=new Uint8Array(buf,off+24,inclLen);
+      off+=24+inclLen;
+      const type=data[0];
+      if(type!==1 && type!==2 && type!==3 && type!==4) continue; // не HCI UART кадр
+      const dir=(type===1||type===2)?"TX":"RX"; // с точки зрения телефона
+      const rel=(deltaUs/1000).toFixed(0);
+      if(type===1){ // HCI command
+        const op=this.u16le(data,1), len=data[3];
+        rows.push({t:rel, dir, kind:"HCI", op:"CMD 0x"+op.toString(16).toUpperCase().padStart(4,"0"), handle:null, uuid:null, value:hex(data.slice(4,4+len))});
+        continue;
+      }
+      if(type!==2 && type!==4) continue; // HCI event (0x03) — пропускаем
+      if(data.length<9) continue;
+      const aclLen=this.u16le(data,3);
+      const l2capLen=this.u16le(data,5);
+      const cid=this.u16le(data,7);
+      if(cid!==0x0004) continue; // только ATT
+      const att=data.slice(9, Math.min(9+l2capLen, data.length));
+      if(!att.length) continue;
+      const aop=att[0];
+      let kind=null, handle=null, value="";
+      switch(aop){
+        case 0x02: kind="MTU req"; value=""+this.u16le(att,1); break;
+        case 0x03: kind="MTU resp"; value=""+this.u16le(att,1); break;
+        case 0x04: kind="FindInfo req"; handle=this.u16le(att,1); break;
+        case 0x05: { // FindInfo resp → handle→UUID
+          kind="FindInfo resp";
+          const fmt=att[1], sz=fmt===1?4:18;
+          for(let i=2;i+sz<=att.length;i+=sz){
+            const h=this.u16le(att,i);
+            let uuid;
+            if(fmt===1){ uuid="0000"+this.u16le(att,i+2).toString(16).padStart(4,"0")+"-0000-1000-8000-00805f9b34fb"; }
+            else { uuid=hex(att.slice(i+2,i+18)).toLowerCase().replace(/^(.{8}) (.{4}) (.{4}) (.{4}) (.{12})$/,"$1-$2-$3-$4-$5"); }
+            handleUuid[h]=uuid;
+          }
+          break; }
+        case 0x10: kind="ReadByGroup req"; break;
+        case 0x11: { // ReadByGroup resp → диапазоны сервисов
+          kind="ReadByGroup resp";
+          const e=att[1];
+          for(let i=2;i+e<=att.length;i+=e){
+            const h1=this.u16le(att,i), h2=this.u16le(att,i+2);
+            let uuid;
+            if(e===6) uuid="0000"+this.u16le(att,i+4).toString(16).padStart(4,"0")+"-0000-1000-8000-00805f9b34fb";
+            else uuid=hex(att.slice(i+4,i+e)).toLowerCase().replace(/^(.{8}) (.{4}) (.{4}) (.{4}) (.{12})$/,"$1-$2-$3-$4-$5");
+            handleUuid[h1]=uuid;
+          }
+          break; }
+        case 0x08: kind="ReadByType req"; handle=this.u16le(att,1); break;
+        case 0x09: kind="ReadByType resp"; break;
+        case 0x0A: kind="Read req"; handle=this.u16le(att,1); break;
+        case 0x0B: kind="Read resp"; handle=this.u16le(att,1); value=hex(att.slice(2)); break;
+        case 0x12: kind="Write req"; handle=this.u16le(att,1); value=hex(att.slice(3)); break;
+        case 0x13: kind="Write resp"; handle=this.u16le(att,1); break;
+        case 0x52: kind="Write cmd"; handle=this.u16le(att,1); value=hex(att.slice(3)); break;
+        case 0x1B: kind="Notify"; handle=this.u16le(att,1); value=hex(att.slice(3)); break;
+        case 0x1E: kind="PrepWrite"; handle=this.u16le(att,1); value=hex(att.slice(5)); break;
+        case 0x1F: kind="PrepWrite resp"; break;
+        case 0x01: kind="Error resp"; handle=this.u16le(att,2); value="req 0x"+att[1].toString(16)+" err 0x"+att[4].toString(16); break;
+        default: kind="ATT 0x"+aop.toString(16); break;
+      }
+      rows.push({t:rel, dir, kind, op:null, handle, uuid:handle!==null?(handleUuid[handle]||null):null, value});
+    }
+    // агрегация уникальных TX-записей
+    const txAgg=new Map();
+    rows.forEach((r,i)=>{
+      if(r.dir==="TX" && (r.kind==="Write cmd"||r.kind==="Write req") && r.value){
+        const key=(r.handle??"?")+"|"+r.value;
+        if(!txAgg.has(key)) txAgg.set(key,{handle:r.handle, uuid:r.uuid, value:r.value, count:0, first:i, t:r.t});
+        txAgg.get(key).count++;
+      }
+    });
+    this.rows=rows; this.txAgg=txAgg; this.parsed={version, datalink};
+    log(`Snoop: ${rows.length} ATT/HCI записей, ${txAgg.size} уникальных TX-записей`);
+  },
+  renderSummary(){
+    const tx=[...this.txAgg.values()].sort((a,b)=>a.first-b.first);
+    const list=tx.slice(0,40).map(e=>
+      `<tr><td>${e.t}с</td><td>h${e.handle??"?"}</td><td>${e.uuid?`<code>${e.uuid.slice(0,8)}</code>`:"—"}</td><td><code>${e.value}</code></td><td>×${e.count}</td></tr>`
+    ).join("");
+    $("snoopSummary").innerHTML=`
+      <div class="grid">
+        <div><div class="label">Записей ATT/HCI</div><div class="value" style="font-size:18px">${this.rows.length}</div></div>
+        <div><div class="label">Уникальных TX-команд</div><div class="value" style="font-size:18px">${this.txAgg.size}</div></div>
+      </div>
+      <div class="muted" style="margin:8px 0 4px">Команды, которые приложение шлёт часам (по времени первой отправки):</div>
+      <table class="tbl"><tr><th>t</th><th>hnd</th><th>UUID</th><th>value</th><th>n</th></tr>${list}</table>
+      ${tx.length>40?`<div class="muted">…и ещё ${tx.length-40}</div>`:""}`;
+  },
+  renderRows(){
+    const gfOnly=$("snoopGF").checked;
+    const flt=($("snoopFilter").value||"").replace(/[^0-9a-f]/gi,"").toUpperCase();
+    let rows=this.rows;
+    if(gfOnly) rows=rows.filter(r=>r.uuid && GF_KEYS.some(k=>r.uuid.toLowerCase().includes(k)));
+    if(flt) rows=rows.filter(r=>r.value && r.value.replace(/ /g,"").includes(flt));
+    const cap=1500;
+    const shown=rows.slice(0,cap).map(r=>
+      `<tr><td>${r.t}</td><td class="${r.dir==="TX"?"ok":"warn-t"}">${r.dir}</td><td>${r.kind}${r.op?" "+r.op:""}</td><td>${r.handle!==null?"h"+r.handle:""}</td><td>${r.uuid?`<code>${r.uuid.slice(0,8)}</code>`:""}</td><td><code>${r.value||""}</code></td></tr>`
+    ).join("");
+    $("snoopOut").innerHTML=`<table class="tbl"><tr><th>t,мс</th><th>dir</th><th>op</th><th>hnd</th><th>uuid</th><th>value</th></tr>${shown}</table>
+      ${rows.length>cap?`<div class="muted">показано ${cap} из ${rows.length} — уточни фильтр</div>`:""}`;
+  },
+  export(){
+    if(!this.rows.length) return;
+    const data={parsedAt:new Date().toISOString(), file:this.parsed, uniqueTx:[...this.txAgg.values()], rows:this.rows};
+    const blob=new Blob([JSON.stringify(data,null,2)],{type:"application/json"});
+    const a=document.createElement("a"); a.href=URL.createObjectURL(blob); a.download="kw66-snoop-parsed.json"; a.click(); URL.revokeObjectURL(a.href);
+  }
+};
+
+/* ---------- привязка UI ---------- */
 $("connect").onclick=connect;
-$("disconnect").onclick=disconnect;
-$("clear").onclick=()=>{$("log").textContent="";logRows=[];rxCount=0;rxBuffers={};$("rxCount").textContent="0";$("lastRx").textContent="—";$("lastTx").textContent="—";};
+$("disconnect").onclick=async()=>{ try{ if(device?.gatt?.connected) device.gatt.disconnect(); }catch{} };
+$("clear").onclick=()=>{ $("log").textContent=""; logRows=[]; rxCount=0; rxBuffers={}; };
 $("export").onclick=()=>{
   const blob=new Blob([JSON.stringify({device:device?.name||null,exportedAt:new Date().toISOString(),packets:logRows},null,2)],{type:"application/json"});
   const a=document.createElement("a"); a.href=URL.createObjectURL(blob); a.download="kw66-log.json"; a.click(); URL.revokeObjectURL(a.href);
 };
 $("battery").onclick=readBattery;
-$("hr").onclick=()=>send([0xE5,0x00]).catch(e=>log(`HR ERROR: ${e.message}`));
-$("steps").onclick=()=>send([0xB2,0xFA]).catch(e=>log(`STEPS ERROR: ${e.message}`));
-$("sendCustom").onclick=()=>{
-  try{send(hexToBytes($("custom").value));}catch(e){log(`CUSTOM ERROR: ${e.message}`);}
-};
+$("steps").onclick=()=>send([0xB2,0xFA]).catch(e=>log(`Steps ERROR: ${e.message}`));
+$("hrReq").onclick=()=>send([0xE5,0x00]).catch(e=>log(`HR ERROR: ${e.message}`));
+$("sendCustom").onclick=()=>{ try{ send(hexToBytes($("custom").value)); }catch(e){ log(`CUSTOM ERROR: ${e.message}`); } };
+$("recStart").onclick=()=>recovery.start();
+$("recCancel").onclick=()=>recovery.cancel();
+$("stressToggle").onclick=()=>stress.toggle();
+$("breatheOpen").onclick=()=>breathe.start();
+$("breatheClose").onclick=()=>breathe.stop();
+$("lieStart").onclick=()=>lie.start();
+$("lieAsk").onclick=()=>lie.ask();
+$("fuzzRun").onclick=()=>fuzzer.run();
+$("fuzzStop").onclick=()=>fuzzer.stop();
+$("snoopFile").onchange=e=>{ const f=e.target.files[0]; if(f) snoop.handleFile(f); };
+$("snoopGF").onchange=()=>snoop.renderRows();
+$("snoopFilter").oninput=()=>snoop.renderRows();
+$("snoopExport").onclick=()=>snoop.export();
+
+setConnected(false);
 if("serviceWorker" in navigator){
-  navigator.serviceWorker.register("./sw.js").then(()=>log("Service Worker: OK")).catch(e=>log(`Service Worker ERROR: ${e.message}`));
+  navigator.serviceWorker.register("./sw.js").then(()=>log("Service Worker: OK")).catch(e=>log(`SW ERROR: ${e.message}`));
 }
 log(`Web Bluetooth: ${navigator.bluetooth ? "доступен" : "недоступен"}`);

@@ -5,30 +5,46 @@
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
   <meta name="theme-color" content="#111827">
   <link rel="manifest" href="manifest.json">
-  <title>KW66 Lab v2.5</title>
+  <title>KW66 Lab v3.0</title>
   <style>
     :root{color-scheme:dark;font-family:system-ui,-apple-system,Segoe UI,sans-serif}
     body{margin:0;background:#0b1020;color:#eef2ff}
-    main{max-width:900px;margin:auto;padding:18px}
+    main{max-width:960px;margin:auto;padding:18px}
     h1{font-size:25px;margin:0 0 4px} h2{font-size:17px;margin:0 0 12px}
     .muted{color:#9ca3af;font-size:13px}
     .card{background:#151c2f;border:1px solid #29334d;border-radius:14px;padding:15px;margin:12px 0}
-    button{border:0;border-radius:10px;padding:11px 14px;margin:4px;background:#26334f;color:#fff;font-weight:600}
-    button.primary{background:#2563eb} button.warn{background:#7c3aed}
-    button:disabled{opacity:.45}
-    .row{display:flex;flex-wrap:wrap;gap:5px}
+    button{border:0;border-radius:10px;padding:11px 14px;margin:4px;background:#26334f;color:#fff;font-weight:600;cursor:pointer}
+    button.primary{background:#2563eb} button.warn{background:#7c3aed} button.good{background:#047857} button.danger{background:#b91c1c}
+    button:disabled{opacity:.45;cursor:default}
+    .row{display:flex;flex-wrap:wrap;gap:5px;align-items:center}
     .status{font-family:ui-monospace,monospace;font-size:13px;white-space:pre-wrap;max-height:260px;overflow:auto;background:#090d18;border-radius:9px;padding:10px}
-    .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px}
-    .value{font-size:25px;font-weight:700}.label{color:#9ca3af;font-size:12px}
-    input{background:#0b1020;color:#fff;border:1px solid #35415e;border-radius:8px;padding:10px;width:100%;box-sizing:border-box}
+    .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}
+    .value{font-size:24px;font-weight:700}.label{color:#9ca3af;font-size:12px}
+    input,select,textarea{background:#0b1020;color:#fff;border:1px solid #35415e;border-radius:8px;padding:10px;width:100%;box-sizing:border-box;font-family:inherit}
+    textarea{font-family:ui-monospace,monospace;font-size:12px;min-height:110px}
     code{font-family:ui-monospace,monospace;font-size:12px;word-break:break-all}
-    .ok{color:#6ee7b7}.bad{color:#fca5a5}
+    .ok{color:#6ee7b7}.bad{color:#fca5a5}.warn-t{color:#fbbf24}
+    table.tbl{width:100%;border-collapse:collapse;font-family:ui-monospace,monospace;font-size:12px}
+    table.tbl th{color:#9ca3af;text-align:left;padding:4px;border-bottom:1px solid #29334d}
+    table.tbl td{padding:4px;border-bottom:1px solid #1c2438;vertical-align:top}
+    .scroll{max-height:340px;overflow:auto}
+    canvas.chart{width:100%;height:170px;background:#090d18;border-radius:9px;display:block}
+    .pill{display:inline-block;padding:2px 10px;border-radius:99px;font-size:12px;font-weight:700;background:#26334f}
+    .pill.run{background:#047857}.pill.hot{background:#b91c1c}
+    /* дыхательный оверлей 4-7-8 */
+    #breathe{position:fixed;inset:0;background:rgba(5,8,18,.94);display:none;align-items:center;justify-content:center;flex-direction:column;z-index:50}
+    #breathe.on{display:flex}
+    #bcircle{width:180px;height:180px;border-radius:50%;background:radial-gradient(circle at 35% 35%,#60a5fa,#2563eb 60%,#1e3a8a);transition:transform 4s ease-in-out;box-shadow:0 0 60px #2563eb88}
+    #bphase{font-size:26px;font-weight:700;margin-top:34px}
+    #bhr{font-size:16px;color:#9ca3af;margin-top:8px}
+    .two{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+    @media(max-width:720px){.two{grid-template-columns:1fr}}
   </style>
 </head>
 <body>
 <main>
-  <h1>KW66 Lab <span class="muted">v2.5</span></h1>
-  <div class="muted">GloryFit BLE / Command Lab</div>
+  <h1>KW66 Lab <span class="muted">v3.0</span></h1>
+  <div class="muted">GloryFit BLE — Command Lab + HR-аналитика + фаззер + btsnoop-парсер</div>
 
   <section class="card">
     <h2>1. Подключение</h2>
@@ -39,45 +55,157 @@
       <button id="export">Экспорт JSON</button>
     </div>
     <div id="device" class="muted">Устройство не подключено</div>
-  </section>
-
-  <section class="card">
-    <h2>2. GloryFit BLE-профиль</h2>
-    <div id="profile">Ожидание подключения…</div>
-    <div class="muted" style="margin-top:8px">
-      TX: <code id="txChar">—</code><br>
-      RX: <code id="rxChar">—</code>
+    <div class="muted" style="margin-top:6px">
+      TX: <code id="txChar">—</code> · RX: <code id="rxChar">—</code>
+      · Батарея: <span id="batVal" class="value" style="font-size:16px">—</span>%
+      · Шаги (B1): <span id="stepsVal" class="value" style="font-size:16px">—</span>
     </div>
   </section>
 
   <section class="card">
-    <h2>3. Command Lab</h2>
+    <h2>2. Live пульс (E5 11 …)</h2>
+    <div class="row" style="margin-bottom:8px">
+      <button id="hrReq">❤️ Отправить E5 00 (проба)</button>
+      <span class="pill" id="hrPill">нет потока</span>
+      <span class="muted">Поток появляется только если замер запущен на часах — v3 отображает и считает по нему.</span>
+    </div>
+    <canvas id="hrChart" class="chart"></canvas>
+    <div class="grid" style="margin-top:10px">
+      <div><div class="label">Сейчас</div><div id="hrNow" class="value">—</div></div>
+      <div><div class="label">Мин / Макс (окно 5 мин)</div><div id="hrMinMax" class="value" style="font-size:16px">—</div></div>
+      <div><div class="label">Среднее</div><div id="hrAvg" class="value" style="font-size:16px">—</div></div>
+      <div><div class="label">Пакетов HR</div><div id="hrCount" class="value" style="font-size:16px">0</div></div>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>3. Тест восстановления (перетрен) <span class="muted">— на то, что есть в часах</span></h2>
+    <div class="muted" style="margin-bottom:8px">Сразу после остановки тренировки нажми «Старт»: 60 секунд тишины, потом вердикт по падению пульса.</div>
     <div class="row">
-      <button id="battery" disabled>🔋 Battery — A2</button>
-      <button id="hr" disabled>❤️ Heart Rate — E5 00</button>
-      <button id="steps" disabled>🚶 Steps — B2 FA</button>
+      <button id="recStart" class="good">▶ Старт (сразу после нагрузки)</button>
+      <button id="recCancel" disabled>Отмена</button>
+      <span class="pill" id="recPill">ожидание</span>
     </div>
-    <div class="grid">
-      <div><div class="label">Последняя команда</div><div id="lastTx" class="value">—</div></div>
-      <div><div class="label">RX пакетов</div><div id="rxCount" class="value">0</div></div>
-      <div><div class="label">Последний RX</div><div id="lastRx" class="value" style="font-size:14px">—</div></div>
+    <div class="grid" style="margin-top:10px">
+      <div><div class="label">Пульс на пике</div><div id="recPeak" class="value">—</div></div>
+      <div><div class="label">Через 60 с</div><div id="recAfter" class="value">—</div></div>
+      <div><div class="label">Падение</div><div id="recDrop" class="value">—</div></div>
+      <div><div class="label">Вердикт</div><div id="recVerdict" class="value" style="font-size:15px">—</div></div>
+    </div>
+    <div id="recTimer" class="muted" style="margin-top:6px"></div>
+  </section>
+
+  <section class="card">
+    <h2>4. Стресс-монитор <span class="muted">v1: пульс ↑ + шаги стоят</span></h2>
+    <div class="muted" style="margin-bottom:8px">Логика: пульс &gt; 100 bpm дольше 3 минут И шаги не растут = похоже на стресс, а не нагрузку. При срабатывании — экран дыхания 4-7-8 с живым пульсом.</div>
+    <div class="row">
+      <button id="stressToggle">Включить монитор</button>
+      <span class="pill" id="stressPill">выкл</span>
+    </div>
+    <div id="stressMsg" class="muted" style="margin-top:6px"></div>
+    <div class="row" style="margin-top:6px">
+      <button id="breatheOpen" class="warn">🫁 Дыхание 4-7-8 (вручную)</button>
     </div>
   </section>
 
   <section class="card">
-    <h2>4. Custom command</h2>
-    <div class="muted" style="margin-bottom:8px">Куда отправить (если найдено несколько TX-каналов):</div>
-    <select id="txSelect" style="width:100%;background:#0b1020;color:#fff;border:1px solid #35415e;border-radius:8px;padding:8px;margin-bottom:8px"></select>
-    <input id="custom" placeholder="Например: A2 или E5 00">
+    <h2>5. Детектор «вруна» <span class="muted">— шуточный, чисто по пульсу</span></h2>
+    <div class="row">
+      <button id="lieStart" class="good">Снять базовую линию (10 с)</button>
+      <button id="lieAsk" disabled>Вопрос задан → измерить реакцию</button>
+    </div>
+    <div id="lieMsg" class="muted" style="margin-top:8px"></div>
+    <div class="grid" style="margin-top:8px">
+      <div><div class="label">База (ср/макс)</div><div id="lieBase" class="value" style="font-size:16px">—</div></div>
+      <div><div class="label">Реакция (макс)</div><div id="lieSpike" class="value" style="font-size:16px">—</div></div>
+      <div><div class="label">Вердикт</div><div id="lieVerdict" class="value" style="font-size:15px">—</div></div>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>6. Command Lab</h2>
+    <div class="row">
+      <button id="battery">🔋 Battery — A2</button>
+      <button id="steps">🚶 Шаги — B2 FA</button>
+    </div>
+    <div class="two" style="margin-top:8px">
+      <div>
+        <div class="muted" style="margin-bottom:4px">Куда отправлять:</div>
+        <select id="txSelect"></select>
+      </div>
+      <div>
+        <div class="muted" style="margin-bottom:4px">Произвольная команда (HEX):</div>
+        <input id="custom" placeholder="Например: A2 или E5 01">
+      </div>
+    </div>
     <div class="row"><button id="sendCustom" class="warn" disabled>Отправить HEX</button></div>
-    <div class="muted">Команда отправляется в выбранную TX characteristic. Используй только команды, которые понимаешь.</div>
   </section>
 
   <section class="card">
-    <h2>5. RAW BLE log</h2>
+    <h2>7. Фаззер команд <span class="muted">— поиск живых опкодов</span></h2>
+    <div class="muted" style="margin-bottom:8px">
+      Шлёт команды по очереди и слушает, что прилетит НЕ из периодики (A2/F7/B1 игнорируются).
+      Кандидаты — гипотезы из семейства протоколов DaFit/GloryFit: HR-старт, binding, вибрация. Строки с # — комментарии.
+    </div>
+    <textarea id="fuzzList" spellcheck="false"># HR-старт?
+E5 01
+E5 02
+E5 03
+E5 10
+# binding / init?
+2F 00
+90 00
+01 00
+15 01
+15 02
+# вибрация?
+35 01
+51 01
+51 02
+5B 01
+73 01</textarea>
+    <div class="two" style="margin-top:8px">
+      <div><div class="muted">Пауза после команды, мс (слушаем ответ)</div><input id="fuzzWindow" type="number" value="1500"></div>
+      <div><div class="muted">Пауза между командами, мс</div><input id="fuzzInterval" type="number" value="400"></div>
+    </div>
+    <div class="row" style="margin-top:8px">
+      <button id="fuzzRun" class="primary">▶ Запустить фаззер</button>
+      <button id="fuzzStop" class="danger" disabled>■ Стоп</button>
+      <span class="pill" id="fuzzPill">готов</span>
+    </div>
+    <div id="fuzzOut" class="scroll" style="margin-top:10px"></div>
+  </section>
+
+  <section class="card">
+    <h2>8. btsnoop-парсер <span class="muted">— что шлёт официальное приложение</span></h2>
+    <div class="muted" style="margin-bottom:8px">
+      Включи «Bluetooth HCI snoop log» в настройках разработчика Android → поработай с часами через GloryFit → вытащи
+      <code>btsnoop_hci.log</code> (или bugreport) → загони файл сюда. Парсер покажет все ATT-записи, соберёт handle→UUID
+      и выделит уникальные команды, которые приложение отправляет часам — включая init-последовательность при коннекте.
+    </div>
+    <input id="snoopFile" type="file" accept="*/*">
+    <div id="snoopSummary" style="margin-top:10px"></div>
+    <div class="row" style="margin-top:8px">
+      <label class="muted" style="display:flex;gap:6px;align-items:center;width:auto"><input type="checkbox" id="snoopGF" checked style="width:auto"> только GloryFit-каналы</label>
+      <input id="snoopFilter" placeholder="фильтр по HEX, напр. E5" style="max-width:220px">
+      <button id="snoopExport" disabled>Экспорт разбора JSON</button>
+    </div>
+    <div id="snoopOut" class="scroll" style="margin-top:10px"></div>
+  </section>
+
+  <section class="card">
+    <h2>9. RAW BLE log</h2>
     <div id="log" class="status"></div>
   </section>
 </main>
+
+<div id="breathe">
+  <div id="bcircle"></div>
+  <div id="bphase"></div>
+  <div id="bhr"></div>
+  <button id="breatheClose" class="danger" style="margin-top:26px">Закончить</button>
+</div>
+
 <script src="app.js"></script>
 </body>
 </html>
