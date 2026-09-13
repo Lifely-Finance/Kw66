@@ -73,7 +73,7 @@ function findAllRx(candidates){
 // (пример из реального лога: "A2" и "64" пришли раздельно).
 // Известные форматы (opcode -> ожидаемая длина); B2 — переменной длины,
 // поэтому для него определяем длину по второму байту.
-const KNOWN_LEN = { 0xA2: 2, 0xA3: 8, 0xF7: 9 };
+const KNOWN_LEN = { 0xA2: 2, 0xA3: 8, 0xE5: 4, 0xF7: 9 };
 function expectedLength(buf){
   const op = buf[0];
   if(op in KNOWN_LEN) return KNOWN_LEN[op];
@@ -87,7 +87,6 @@ function expectedLength(buf){
     if(buf[1] === 0x07) return 18;            // запись истории (год начинается с 0x07)
     return 2;                                  // ack-подобные короткие ответы
   }
-  if(op === 0xE5) return null; // формат неизвестен — ждём эмпирических данных
   return null; // неизвестный opcode — сбрасываем как есть, без буферизации
 }
 function pushToBuffer(uuid, bytes){
@@ -127,12 +126,17 @@ function decodePacket(b, uuid){
   if(!b.length) return;
   const src = uuid ? `[${labelFor(uuid)}] ` : "";
   const op=b[0];
-  if(op===0xE5 && b.length>8){
-    const hr=b[8];
-    if(hr>=40 && hr<=200) log(`  ↳ ${src}E5: кандидат HR = ${hr} bpm`);
-    else log(`  ↳ ${src}E5: ответ получен, но byte[8]=${hr} вне диапазона HR`);
+  if(op===0xE5 && b.length===4){
+    const mode=b[1], hr=b[3];
+    const modeLabel = mode===0x11 ? "идёт измерение" : (mode===0x00 ? "финальное значение" : `режим 0x${mode.toString(16)}`);
+    if(hr>=40 && hr<=200) log(`  ↳ ${src}E5 (${modeLabel}): пульс = ${hr} bpm`);
+    else log(`  ↳ ${src}E5: byte[3]=${hr} вне диапазона HR (${modeLabel})`);
   }
   if(op===0xA2) log(`  ↳ ${src}A2: батарея = ${b[1]}%`);
+  if(op===0xF7 && b.length===9){
+    const year=(b[2]<<8)|b[3];
+    log(`  ↳ ${src}F7 (sub ${b[1]}): время часов ≈ ${year}-${pad(b[4])}-${pad(b[5])} ${pad(b[6])}:${pad(b[7])}`);
+  }
   if(op===0xA3 && b.length>=8){
     const year=(b[1]<<8)|b[2];
     log(`  ↳ ${src}A3: время часов = ${year}-${pad(b[3])}-${pad(b[4])} ${pad(b[5])}:${pad(b[6])}:${pad(b[7])}`);
