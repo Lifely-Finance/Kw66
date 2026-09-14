@@ -1,8 +1,8 @@
-# KW66 Lab v3.7 — Morse Messenger prototype
+# KW66 Lab v3.8 — Morse Messenger prototype
 
 ## Новый этап: KW66 как скрытая Morse-клавиатура
 
-В v3.7 добавлен первый прототип **Morse Messenger** поверх уже подтверждённых событий KW66:
+В v3.8 добавлен первый прототип **Morse Messenger** поверх уже подтверждённых событий KW66:
 
 - `D1 09` — Previous → `.`
 - `D1 07` — Play/Pause → `-`
