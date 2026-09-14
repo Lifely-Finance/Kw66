@@ -43,8 +43,8 @@
 </head>
 <body>
 <main>
-  <h1>KW66 Lab <span class="muted">v3.1</span></h1>
-  <div class="muted">GloryFit BLE — Command Lab + HR-аналитика + фаззер + btsnoop-парсер</div>
+  <h1>KW66 Lab <span class="muted">v3.4</span></h1>
+  <div class="muted">GloryFit BLE — protocol lab + HR-аналитика + motion probe + фаззер + btsnoop-парсер</div>
 
   <section class="card">
     <h2>1. Подключение</h2>
@@ -148,14 +148,12 @@
       есть заголовок <code>id</code> (категория) + <code>len</code> (длина текста в байтах,
       считается автоматически). <b>id=0x00 на реальных часах показывает экран входящего
       звонка</b> (иконка сброса, тап гасит экран) — если не хочешь такое поведение, оставляй
-      ненулевой id. Экран обрезает длинный текст многоточием (без переноса/скролла) —
-      счётчик ниже показывает превью того, что реально влезет.
+      ненулевой id. Формат в целом ещё не до конца проверен — сообщай, если что-то не так.
     </div>
     <div class="two">
       <div>
         <div class="muted" style="margin-bottom:4px">Текст:</div>
         <textarea id="watchText" placeholder="Текст для отображения на часах…">Привет с телефона!</textarea>
-        <div id="watchTextCounter" class="muted" style="margin-top:4px"></div>
       </div>
       <div>
         <div class="muted" style="margin-bottom:4px">id категории (HEX, не 00):</div>
@@ -164,6 +162,54 @@
     </div>
     <div class="row" style="margin-top:8px">
       <button id="sendWatchText" class="warn" disabled>Отправить текст (0xC5)</button>
+    </div>
+  </section>
+
+
+  <section class="card">
+    <h2>6c. KW66 Protocol Lab <span class="muted">— карта протокола + безопасные пробы движения</span></h2>
+    <div class="muted" style="margin-bottom:8px">
+      Команды ниже разделены по уровню подтверждения. «Известно» — команда/ответ уже наблюдались в KW66-трафике.
+      «Эксперимент» — кандидат из анализа протокола; результат нужно подтвердить на твоих часах.
+      Опасные операции (сброс/OTA) здесь намеренно не добавлены.
+    </div>
+    <div class="grid" style="margin-bottom:10px">
+      <div><div class="label">Основной TX</div><div id="protoTx" class="value" style="font-size:15px">—</div></div>
+      <div><div class="label">Основной RX</div><div id="protoRx" class="value" style="font-size:15px">—</div></div>
+      <div><div class="label">Пакетов RX</div><div id="protoRxCount" class="value" style="font-size:15px">0</div></div>
+      <div><div class="label">Motion-кандидаты</div><div id="motionCount" class="value" style="font-size:15px">0</div></div>
+    </div>
+    <div class="two">
+      <div>
+        <div class="muted" style="margin-bottom:4px">Подтверждённые/низкорисковые</div>
+        <div class="row">
+          <button id="protoA1">A1 — модель/серийник</button>
+          <button id="protoA2">A2 — батарея</button>
+          <button id="protoA3">A3 — время</button>
+          <button id="protoB2">B2 FA — история шагов</button>
+        </div>
+      </div>
+      <div>
+        <div class="muted" style="margin-bottom:4px">Motion / gesture — эксперимент</div>
+        <div class="row">
+          <button id="motionC401" class="warn">C4 01</button>
+          <button id="motionC402" class="warn">C4 02</button>
+          <button id="motionC403" class="warn">C4 03</button>
+          <button id="motionD700" class="warn">D7 00</button>
+          <button id="motionD701" class="warn">D7 01</button>
+          <button id="motionD702" class="warn">D7 02</button>
+        </div>
+      </div>
+    </div>
+    <div class="row" style="margin-top:8px">
+      <button id="motionListen" class="primary">▶ Слушать motion 30 с</button>
+      <button id="motionClear">Очистить motion</button>
+      <span class="pill" id="motionPill">готов</span>
+    </div>
+    <div id="motionOut" class="scroll" style="margin-top:10px"></div>
+    <div class="muted" style="margin-top:8px">
+      Цель этого блока — проверить, существует ли скрытый BLE-путь для жестов/движения. Сырые XYZ пока
+      <b>не считаются найденными</b>: если часы отвечают только ACK/событием, это не raw accelerometer.
     </div>
   </section>
 

@@ -75,6 +75,8 @@ function record(direction, bytes, uuid){
   logRows.push({time:new Date().toISOString(), direction, hex:value, source:uuid?labelFor(uuid):undefined});
   if(direction==="RX"){
     rxCount++; $("rxCount") && ($("rxCount").textContent=rxCount);
+    if(window.protocolLab) protocolLab.recordMotion(bytes, uuid);
+    if($("protoRxCount")) $("protoRxCount").textContent=rxCount;
   }
 }
 function setConnected(v){
@@ -151,6 +153,7 @@ async function connect(){
     for(const c of fee7Chars){ if(c.properties.notify||c.properties.indicate) await subscribe(c); }
     setConnected(txChars.length>0);
     log(`Профиль GloryFit: TX=${txChars.length}, RX=${rxCharsAll.length}`);
+    updateProtocolUi();
   }catch(e){
     log(`ОШИБКА: ${e.name||"Error"}: ${e.message||e}`);
   }
@@ -618,6 +621,73 @@ const fuzzer={
   }
 };
 
+
+/* ---------- KW66 protocol / motion lab ---------- */
+const protocolLab = {
+  motion: [],
+  listening: false,
+  timer: null,
+  lastRxCount: 0,
+  recordMotion(bytes, uuid) {
+    const h=hex(bytes), op=bytes[0];
+    // C4/D7 are tracked as motion/gesture candidates; keep ALL packets while listening
+    // because a real sensor stream may use a different opcode.
+    const interesting = this.listening || op===0xC4 || op===0xD7;
+    if(!interesting) return;
+    const row={t:new Date().toISOString(), uuid:labelFor(uuid), hex:h, op};
+    this.motion.push(row);
+    $("motionCount").textContent=this.motion.length;
+    const cap=this.motion.slice(-120);
+    $("motionOut").innerHTML=cap.map(r=>`<div><span class="muted">${new Date(r.t).toLocaleTimeString()}</span> <code>${r.uuid}</code> <code>${r.hex}</code></div>`).join("");
+  },
+  async cmd(bytes, label, experimental=false){
+    if(experimental){
+      const ok=confirm(`${label}\n\nЭто экспериментальная команда из реверса протокола. Она может изменить режим жестов/управления часами. Продолжить?`);
+      if(!ok) return;
+    }
+    try { await send(bytes); log(`Protocol Lab: ${label} → ${hex(bytes)}`); }
+    catch(e){ log(`Protocol Lab ERROR (${label}): ${e.message}`); }
+  },
+  start(){
+    if(this.listening) return;
+    this.listening=true;
+    this.motion=[];
+    $("motionCount").textContent="0";
+    $("motionOut").innerHTML="";
+    $("motionPill").textContent="слушаю 30 с";
+    $("motionPill").className="pill run";
+    this.timer=setTimeout(()=>this.stop(),30000);
+    log("Motion Lab: начат пассивный сбор всех RX-пакетов на 30 секунд.");
+  },
+  stop(){
+    if(!this.listening) return;
+    this.listening=false;
+    if(this.timer) clearTimeout(this.timer);
+    this.timer=null;
+    $("motionPill").textContent="готов";
+    $("motionPill").className="pill";
+    log(`Motion Lab: остановлен, собрано ${this.motion.length} пакетов.`);
+  },
+  clear(){
+    this.motion=[];
+    $("motionCount").textContent="0";
+    $("motionOut").innerHTML="";
+  }
+};
+
+const protocolSafe = {
+  async a1(){ await protocolLab.cmd([0xA1],"A1 — модель/серийник"); },
+  async a2(){ await protocolLab.cmd([0xA2],"A2 — батарея"); },
+  async a3(){ await protocolLab.cmd([0xA3],"A3 — время"); },
+  async b2(){ await protocolLab.cmd([0xB2,0xFA],"B2 FA — история шагов"); }
+};
+
+function updateProtocolUi(){
+  $("protoTx").textContent=txChars.map(c=>labelFor(c.uuid)).join(", ")||"—";
+  $("protoRx").textContent=rxCharsAll.map(c=>labelFor(c.uuid)).join(", ")||"—";
+  $("protoRxCount").textContent=rxCount;
+}
+
 /* ---------- btsnoop-парсер ---------- */
 const snoop={
   rows:[], txAgg:new Map(), parsed:null,
@@ -774,28 +844,6 @@ $("sendWatchText").onclick=()=>{
   const id=parseInt(idHex,16);
   sendWatchText($("watchText").value, isNaN(id)?0x01:id).catch(e=>log(`TEXT ERROR: ${e.message}`));
 };
-// живой счётчик + превью обрезки: по замеру на реальных часах длиннее
-// ~158 байт UTF-16BE текст просто обрезается и заменяется многоточием —
-// без переноса на "страницы". Показываем, что реально останется на экране.
-const WATCH_TEXT_SAFE_BYTES=158;
-function updateWatchTextCounter(){
-  const t=$("watchText").value;
-  const bytes=utf16beBytes(t);
-  const b=bytes.length;
-  const el=$("watchTextCounter");
-  let extra="";
-  if(b>WATCH_TEXT_SAFE_BYTES){
-    // приблизительная обрезка по символам (не байтам) — часы режут по тексту,
-    // не по сырым байтам, поэтому считаем в JS-символах, а не в utf16be-байтах
-    const safeChars=Math.floor(WATCH_TEXT_SAFE_BYTES/2);
-    const preview=t.slice(0,safeChars-1)+"…";
-    extra=` — на экране, вероятно: "${preview}"`;
-  }
-  el.textContent=`${t.length} симв. / ${b} байт${extra}`;
-  el.className=b>255?"muted bad":(b>WATCH_TEXT_SAFE_BYTES?"muted warn-t":"muted");
-}
-$("watchText").addEventListener("input", updateWatchTextCounter);
-updateWatchTextCounter();
 $("recStart").onclick=()=>recovery.start();
 $("recCancel").onclick=()=>recovery.cancel();
 $("stressToggle").onclick=()=>stress.toggle();
@@ -809,8 +857,22 @@ $("snoopFile").onchange=e=>{ const f=e.target.files[0]; if(f) snoop.handleFile(f
 $("snoopGF").onchange=()=>snoop.renderRows();
 $("snoopFilter").oninput=()=>snoop.renderRows();
 $("snoopExport").onclick=()=>snoop.export();
+$("protoA1").onclick=()=>protocolSafe.a1();
+$("protoA2").onclick=()=>protocolSafe.a2();
+$("protoA3").onclick=()=>protocolSafe.a3();
+$("protoB2").onclick=()=>protocolSafe.b2();
+$("motionC401").onclick=()=>protocolLab.cmd([0xC4,0x01],"C4 01 — motion candidate",true);
+$("motionC402").onclick=()=>protocolLab.cmd([0xC4,0x02],"C4 02 — motion candidate",true);
+$("motionC403").onclick=()=>protocolLab.cmd([0xC4,0x03],"C4 03 — motion candidate",true);
+$("motionD700").onclick=()=>protocolLab.cmd([0xD7,0x00],"D7 00 — gesture candidate",true);
+$("motionD701").onclick=()=>protocolLab.cmd([0xD7,0x01],"D7 01 — gesture candidate",true);
+$("motionD702").onclick=()=>protocolLab.cmd([0xD7,0x02],"D7 02 — gesture candidate",true);
+$("motionListen").onclick=()=>protocolLab.listening?protocolLab.stop():protocolLab.start();
+$("motionClear").onclick=()=>protocolLab.clear();
+
 
 setConnected(false);
+updateProtocolUi();
 if("serviceWorker" in navigator){
   navigator.serviceWorker.register("./sw.js").then(()=>log("Service Worker: OK")).catch(e=>log(`SW ERROR: ${e.message}`));
 }
