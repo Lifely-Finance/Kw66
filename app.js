@@ -1,5 +1,5 @@
 /* ============================================================
-   KW66 Lab v3.8
+   KW66 Lab v3.9
    GloryFit BLE + KW66 Morse Messenger stealth prototype
    v3.1: перенесены фиксы буферизации из отдельной ветки —
    F7=11 байт (min/max HR в хвосте), E5 не фиксированной длины
@@ -850,6 +850,8 @@ const snoop={
 /* ---------- KW66 Morse Messenger v0.1 ----------
    Stealth-first prototype:
    D1 09 = dot, D1 07 = dash, D1 08 = commit letter.
+   Long-press gestures are inferred from a repeated D1 burst because BLE exposes
+   the touch event, not the physical press/release duration.
    The plaintext is kept only in memory and is never rendered unless debug is enabled.
    Crypto is a transport-ready local prototype: ECDH P-256 + HKDF-SHA-256 + AES-256-GCM.
    Production pairing should add authenticated identity verification and a real relay.
@@ -867,8 +869,11 @@ const MORSE_RU = {
   '-..-':'Ь','..-..':'Э','..--':'Ю','.-.-':'Я'
 };
 const MORSE_MAP={...MORSE_EN,...MORSE_RU};
+const MORSE_LONG_BURST_COUNT = 4;
+const MORSE_LONG_BURST_MS = 1500;
 const morse={
   pattern:'', text:'', symbols:0, letters:0, debug:false, key:null, salt:null,
+  gesture:{opcode:null,times:[],snapshot:null},
   setState(s){ $('morseState').textContent=s; },
   ui(){ $('morseSymbols').textContent=this.symbols; $('morseLetters').textContent=this.letters; },
   dbg(s){ if(this.debug){ const el=$('morseDebugOut'); el.style.display='block'; el.textContent+=(el.textContent?'\n':'')+`[${new Date().toLocaleTimeString()}] ${s}`; el.scrollTop=el.scrollHeight; } },
@@ -885,8 +890,47 @@ const morse={
     this.setState(kind==='commit'?'буква принята':'приём'); this.ui();
     this.dbg(`event ${kind} (${source}) pattern=${this.pattern||'∅'}`);
   },
+  restoreGestureSnapshot(){
+    const g=this.gesture.snapshot;
+    if(!g) return;
+    this.pattern=g.pattern; this.text=g.text; this.symbols=g.symbols; this.letters=g.letters;
+    this.ui();
+  },
+  longAction(op){
+    this.restoreGestureSnapshot();
+    if(op===0x09){
+      if(this.pattern){ this.pattern=''; }
+      else if(this.text){ this.text=this.text.slice(0,-1); this.letters=Math.max(0,this.letters-1); }
+      $('morseLast').textContent='⌫ удалено'; this.setState('удаление'); this.dbg('LONG Previous → delete');
+    } else if(op===0x08){
+      this.space(); $('morseLast').textContent='␠ пробел'; this.setState('пробел'); this.dbg('LONG Next → space');
+    } else if(op===0x07){
+      this.send().catch(e=>log(`Morse ERROR: ${e.message}`));
+      this.dbg('LONG Play/Pause → send');
+    }
+    this.ui();
+  },
+  handleD1(op){
+    const now=performance.now();
+    if(this.gesture.opcode!==op || !this.gesture.times.length || now-this.gesture.times[this.gesture.times.length-1]>MORSE_LONG_BURST_MS){
+      this.gesture={opcode:op,times:[now],snapshot:{pattern:this.pattern,text:this.text,symbols:this.symbols,letters:this.letters}};
+    } else {
+      this.gesture.times.push(now);
+    }
+    if(op===0x09) this.event('dot','KW66 D1 09');
+    else if(op===0x07) this.event('dash','KW66 D1 07');
+    else if(op===0x08) this.event('commit','KW66 D1 08');
+    else return false;
+    if(this.gesture.times.length>=MORSE_LONG_BURST_COUNT){
+      const span=now-this.gesture.times[0];
+      this.dbg(`long burst op=0x${op.toString(16)} count=${this.gesture.times.length} span=${Math.round(span)}ms`);
+      this.longAction(op);
+      this.gesture={opcode:null,times:[],snapshot:null};
+    }
+    return true;
+  },
   space(){ this.text+=' '; this.letters++; this.symbols++; $('morseLast').textContent='Пробел'; this.setState('пробел'); this.ui(); this.dbg('space'); },
-  reset(){ this.pattern='';this.text='';this.symbols=0;this.letters=0;this.setState('ожидание');$('morseLast').textContent='—';this.ui();$('morseDebugOut').textContent='';this.dbg('reset'); },
+  reset(){ this.pattern='';this.text='';this.symbols=0;this.letters=0;this.gesture={opcode:null,times:[],snapshot:null};this.setState('ожидание');$('morseLast').textContent='—';this.ui();$('morseDebugOut').textContent='';this.dbg('reset'); },
   async ensureKey(){
     if(this.key) return this.key;
     this.key=await crypto.subtle.generateKey({name:'AES-GCM',length:256},true,['encrypt','decrypt']);
@@ -911,6 +955,11 @@ const morse={
     return new TextDecoder().decode(plain);
   },
   async send(){
+    if(this.pattern){
+      const ch=MORSE_MAP[this.pattern]||'□';
+      this.text+=ch; this.letters++; this.pattern='';
+      this.dbg(`auto-commit before send: ${ch}`);
+    }
     // For v0.1 this is deliberately a local crypto loopback, not a fake network send.
     // It proves the exact data boundary that will later be handed to the relay/WebRTC layer.
     if(!this.text) return;
@@ -936,10 +985,7 @@ const morse={
 
 function handleD1(b){
   if(!b || b[0]!==0xD1 || b.length<2) return false;
-  if(b[1]===0x09){ morse.event('dot','KW66 D1 09'); return true; }
-  if(b[1]===0x07){ morse.event('dash','KW66 D1 07'); return true; }
-  if(b[1]===0x08){ morse.event('commit','KW66 D1 08'); return true; }
-  return false;
+  return morse.handleD1(b[1]);
 }
 
 morse.debug=false;
