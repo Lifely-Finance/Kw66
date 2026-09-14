@@ -1,5 +1,5 @@
 /* ============================================================
-   KW66 Lab v3.1
+   KW66 Lab v3.5
    GloryFit BLE: command lab + HR analytics + fuzzer + btsnoop
    v3.1: перенесены фиксы буферизации из отдельной ветки —
    F7=11 байт (min/max HR в хвосте), E5 не фиксированной длины
@@ -39,6 +39,7 @@ const LABELS = {
 const KNOWN_LEN = { 0xA2: 2, 0xA3: 8, 0xF7: 11 };
 // периодический «фон» — для фаззера и статистики не считается ответом
 const PERIODIC_OPS = new Set([0xA2, 0xF7, 0xB1]);
+const UNKNOWN_TRACK_OPS = new Set([0xCB, 0x31]);
 const GF_KEYS = ["55ff","56ff","33f1","33f2","34f1","34f2","b003","b004","2a19"];
 
 /* ---------- состояние ---------- */
@@ -336,6 +337,12 @@ function decodePacket(b, uuid){
   else if(op===0xC5 && b.length===2){
     log(`  ↳ ${src}C5: часы квитировали кусок #${b[1]}`);
   }
+  else if(op===0xCB){
+    log(`  ↳ ${src}CB: неизвестный RX-пакет (${hex(b)}) — не отправлять`);
+  }
+  else if(op===0x31){
+    log(`  ↳ ${src}31: неизвестный RX-пакет (${hex(b)}) — не отправлять`);
+  }
 }
 
 /* ---------- живой пульс ---------- */
@@ -624,55 +631,45 @@ const fuzzer={
 
 /* ---------- KW66 protocol / motion lab ---------- */
 const protocolLab = {
-  motion: [],
-  listening: false,
-  timer: null,
-  lastRxCount: 0,
-  recordMotion(bytes, uuid) {
-    const h=hex(bytes), op=bytes[0];
-    // C4/D7 are tracked as motion/gesture candidates; keep ALL packets while listening
-    // because a real sensor stream may use a different opcode.
-    const interesting = this.listening || op===0xC4 || op===0xD7;
-    if(!interesting) return;
-    const row={t:new Date().toISOString(), uuid:labelFor(uuid), hex:h, op};
-    this.motion.push(row);
+  motion: [], listening:false, correlating:false, timer:null, phaseTimer:null,
+  phase:0, phaseStart:0,
+  phases:[{name:"REST 1",ms:20000,hint:"не двигай часы"},{name:"MOVE",ms:20000,hint:"активно двигай рукой/часами"},{name:"REST 2",ms:20000,hint:"снова не двигай часы"}],
+  recordMotion(bytes,uuid){
+    const op=bytes[0], interesting=this.listening||this.correlating||UNKNOWN_TRACK_OPS.has(op)||op===0xC4||op===0xD7;
+    if(!interesting)return;
+    this.motion.push({t:Date.now(),uuid:labelFor(uuid),hex:hex(bytes),op,phase:this.correlating?this.phases[this.phase].name:null});
+    if(this.motion.length>2000)this.motion.shift(); this.render();
+  },
+  render(){
     $("motionCount").textContent=this.motion.length;
-    const cap=this.motion.slice(-120);
-    $("motionOut").innerHTML=cap.map(r=>`<div><span class="muted">${new Date(r.t).toLocaleTimeString()}</span> <code>${r.uuid}</code> <code>${r.hex}</code></div>`).join("");
+    const counts={}; for(const r of this.motion){const o=r.hex.split(" ")[0];counts[o]=(counts[o]||0)+1;}
+    const sum=Object.entries(counts).sort((a,b)=>b[1]-a[1]).map(([o,n])=>`<span class="pill">${o} ×${n}</span>`).join(" ");
+    const rows=this.motion.slice(-180).map(r=>`<div><span class="muted">${new Date(r.t).toLocaleTimeString()}</span> <code>${r.uuid||"?"}</code> <code>${r.hex}</code> ${r.phase?`<span class="muted">${r.phase}</span>`:""}</div>`).join("");
+    $("motionOut").innerHTML=`<div style="margin-bottom:6px">${sum||'<span class="muted">нет пакетов</span>'}</div>${rows}`;
   },
-  async cmd(bytes, label, experimental=false){
-    if(experimental){
-      const ok=confirm(`${label}\n\nЭто экспериментальная команда из реверса протокола. Она может изменить режим жестов/управления часами. Продолжить?`);
-      if(!ok) return;
-    }
-    try { await send(bytes); log(`Protocol Lab: ${label} → ${hex(bytes)}`); }
-    catch(e){ log(`Protocol Lab ERROR (${label}): ${e.message}`); }
+  async cmd(bytes,label,experimental=false){
+    if(experimental&&!confirm(`${label}\n\nЭкспериментальная команда. Это не доказанный raw accelerometer-путь. Продолжить?`))return;
+    try{await send(bytes);log(`Protocol Lab: ${label} → ${hex(bytes)}`);}catch(e){log(`Protocol Lab ERROR (${label}): ${e.message}`);}
   },
-  start(){
-    if(this.listening) return;
-    this.listening=true;
-    this.motion=[];
-    $("motionCount").textContent="0";
-    $("motionOut").innerHTML="";
-    $("motionPill").textContent="слушаю 30 с";
-    $("motionPill").className="pill run";
-    this.timer=setTimeout(()=>this.stop(),30000);
-    log("Motion Lab: начат пассивный сбор всех RX-пакетов на 30 секунд.");
+  start(){if(this.listening||this.correlating)return;this.listening=true;this.motion=[];$("motionCount").textContent="0";$("motionPill").textContent="слушаю 30 с";$("motionPill").className="pill run";this.render();this.timer=setTimeout(()=>this.stop(),30000);log("Motion Lab: пассивный сбор всех RX на 30 секунд.");},
+  stop(){if(!this.listening)return;this.listening=false;if(this.timer)clearTimeout(this.timer);this.timer=null;$("motionPill").textContent="готов";$("motionPill").className="pill";this.render();log(`Motion Lab: остановлен, собрано ${this.motion.length} пакетов.`);},
+  startCorrelation(){
+    if(this.listening||this.correlating)return;this.correlating=true;this.motion=[];this.phase=0;this.phaseStart=Date.now();
+    $("motionCount").textContent="0";$("motionPill").textContent="REST 1 — 20 с";$("motionPill").className="pill run";this.render();
+    log("Motion Correlator: 60 с — REST 20 → MOVE 20 → REST 20.");this.phaseTimer=setInterval(()=>this.tickCorrelation(),250);this.timer=setTimeout(()=>this.stopCorrelation(),60000);
   },
-  stop(){
-    if(!this.listening) return;
-    this.listening=false;
-    if(this.timer) clearTimeout(this.timer);
-    this.timer=null;
-    $("motionPill").textContent="готов";
-    $("motionPill").className="pill";
-    log(`Motion Lab: остановлен, собрано ${this.motion.length} пакетов.`);
+  tickCorrelation(){
+    if(!this.correlating)return;let elapsed=Date.now()-this.phaseStart;
+    if(elapsed>=this.phases[this.phase].ms){this.phase++;this.phaseStart=Date.now();if(this.phase>=this.phases.length){this.stopCorrelation();return;}log(`Motion Correlator: ${this.phases[this.phase].name} — ${this.phases[this.phase].hint}.`);}
+    const ph=this.phases[this.phase],left=Math.max(0,Math.ceil((ph.ms-(Date.now()-this.phaseStart))/1000));$("motionPill").textContent=`${ph.name} — ${left} с`;
   },
-  clear(){
-    this.motion=[];
-    $("motionCount").textContent="0";
-    $("motionOut").innerHTML="";
-  }
+  stopCorrelation(){
+    if(!this.correlating)return;this.correlating=false;if(this.timer)clearTimeout(this.timer);if(this.phaseTimer)clearInterval(this.phaseTimer);this.timer=null;this.phaseTimer=null;
+    $("motionPill").textContent="готов";$("motionPill").className="pill";const st={};for(const r of this.motion){const o=r.hex.split(" ")[0];st[o]=(st[o]||0)+1;}
+    log(`Motion Correlator: завершён. RX=${this.motion.length}; CB=${st.CB||0}; 31=${st["31"]||0}; B1=${st.B1||0}.`);this.render();
+  },
+  exportCorrelation(){const blob=new Blob([JSON.stringify({version:"KW66 Lab v3.5",createdAt:new Date().toISOString(),note:"REST/MOVE/REST; CB and 31 are RX-only candidates",packets:this.motion},null,2)],{type:"application/json"});const a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download=`kw66-motion-${Date.now()}.json`;a.click();URL.revokeObjectURL(a.href);},
+  clear(){if(this.correlating)this.stopCorrelation();this.motion=[];$("motionCount").textContent="0";$("motionOut").innerHTML="";}
 };
 
 const protocolSafe = {
@@ -861,14 +858,16 @@ $("protoA1").onclick=()=>protocolSafe.a1();
 $("protoA2").onclick=()=>protocolSafe.a2();
 $("protoA3").onclick=()=>protocolSafe.a3();
 $("protoB2").onclick=()=>protocolSafe.b2();
-$("motionC401").onclick=()=>protocolLab.cmd([0xC4,0x01],"C4 01 — motion candidate",true);
-$("motionC402").onclick=()=>protocolLab.cmd([0xC4,0x02],"C4 02 — motion candidate",true);
-$("motionC403").onclick=()=>protocolLab.cmd([0xC4,0x03],"C4 03 — motion candidate",true);
-$("motionD700").onclick=()=>protocolLab.cmd([0xD7,0x00],"D7 00 — gesture candidate",true);
-$("motionD701").onclick=()=>protocolLab.cmd([0xD7,0x01],"D7 01 — gesture candidate",true);
-$("motionD702").onclick=()=>protocolLab.cmd([0xD7,0x02],"D7 02 — gesture candidate",true);
+$("motionC401").onclick=()=>protocolLab.cmd([0xC4,0x01],"C4 01 — camera/gesture candidate",true);
+$("motionC402").onclick=()=>protocolLab.cmd([0xC4,0x02],"C4 02 — camera/gesture candidate",true);
+$("motionC403").onclick=()=>protocolLab.cmd([0xC4,0x03],"C4 03 — camera/gesture candidate",true);
+$("motionD700").onclick=()=>protocolLab.cmd([0xD7,0x00],"D7 00 — DND candidate",true);
+$("motionD701").onclick=()=>protocolLab.cmd([0xD7,0x01],"D7 01 — DND candidate",true);
+$("motionD702").onclick=()=>protocolLab.cmd([0xD7,0x02],"D7 02 — DND candidate",true);
 $("motionListen").onclick=()=>protocolLab.listening?protocolLab.stop():protocolLab.start();
 $("motionClear").onclick=()=>protocolLab.clear();
+$("motionCorrelate").onclick=()=>protocolLab.correlating?protocolLab.stopCorrelation():protocolLab.startCorrelation();
+$("motionExport").onclick=()=>protocolLab.exportCorrelation();
 
 
 setConnected(false);
