@@ -867,11 +867,12 @@ const MORSE_RU = {
   '-..-':'Ь','..-..':'Э','..--':'Ю','.-.-':'Я'
 };
 const MORSE_MAP={...MORSE_EN,...MORSE_RU};
-const MORSE_HOLD_MS = 850;
+const MORSE_HOLD_MS = 1150;
+const MORSE_PLAY_SUPPRESS_MS = 1250;
 const MORSE_DOUBLE_MS = 550;
 const morse={
   pattern:'', text:'', symbols:0, letters:0, debug:false, key:null, salt:null,
-  pendingPlay:null, pendingNext:null, playTimer:null, nextTimer:null,
+  pendingPlay:null, pendingNext:null, playTimer:null, nextTimer:null, playSuppressUntil:0, playSuppressTimer:null,
   setState(s){ $('morseState').textContent=s; },
   ui(){ $('morseSymbols').textContent=this.symbols; $('morseLetters').textContent=this.letters; },
   dbg(s){ if(this.debug){ const el=$('morseDebugOut'); el.style.display='block'; el.textContent+=(el.textContent?'\n':'')+`[${new Date().toLocaleTimeString()}] ${s}`; el.scrollTop=el.scrollHeight; } },
@@ -915,8 +916,8 @@ const morse={
     $('morseLast').textContent='Пробел'; this.setState('пробел'); this.ui(); this.dbg('Next short → space');
   },
   reset(){
-    clearTimeout(this.playTimer); clearTimeout(this.nextTimer);
-    this.pendingPlay=null; this.pendingNext=null;
+    clearTimeout(this.playTimer); clearTimeout(this.nextTimer); clearTimeout(this.playSuppressTimer);
+    this.pendingPlay=null; this.pendingNext=null; this.playSuppressUntil=0;
     this.pattern='';this.text='';this.symbols=0;this.letters=0;this.setState('ожидание');$('morseLast').textContent='—';this.ui();$('morseDebugOut').textContent='';this.dbg('reset');
   },
   async ensureKey(){
@@ -975,10 +976,23 @@ function handleD1(b){
   // Next short (D1 08) = space; double short = send.
   // Previous short (D1 09) = delete unfinished symbol or last letter.
   if(code===0x07){
+    // A long Play generates a burst of repeated D1 07 packets. The first
+    // packet is held pending; once a repeat arrives, emit exactly one dash
+    // and suppress the rest of that burst so it cannot become extra dots.
+    if(now < morse.playSuppressUntil){
+      morse.playSuppressUntil=now+MORSE_PLAY_SUPPRESS_MS;
+      clearTimeout(morse.playSuppressTimer);
+      morse.playSuppressTimer=setTimeout(()=>{ morse.playSuppressUntil=0; }, MORSE_PLAY_SUPPRESS_MS);
+      morse.dbg('ignored repeated D1 07 during long Play');
+      return true;
+    }
     if(morse.pendingPlay && (now-morse.pendingPlay.at)<=MORSE_HOLD_MS){
       clearTimeout(morse.playTimer);
       morse.pendingPlay=null;
       morse.event('dash','KW66 D1 07 long');
+      morse.playSuppressUntil=now+MORSE_PLAY_SUPPRESS_MS;
+      clearTimeout(morse.playSuppressTimer);
+      morse.playSuppressTimer=setTimeout(()=>{ morse.playSuppressUntil=0; }, MORSE_PLAY_SUPPRESS_MS);
       morse.dbg('long Play → dash');
       return true;
     }
