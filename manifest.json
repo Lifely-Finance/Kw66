@@ -1,10 +1,9 @@
 {
-  "name": "KW66 Lab v3.8 — Morse Messenger",
-  "short_name": "KW66 Morse",
-  "start_url": "./",
+  "name": "KW66 Morse Messenger",
+  "short_name": "KW66 Msg",
+  "start_url": "./index.html",
   "display": "standalone",
   "background_color": "#0b1020",
   "theme_color": "#111827",
-  "lang": "ru",
-  "description": "KW66 BLE lab with stealth Morse Messenger prototype"
+  "icons": []
 }
