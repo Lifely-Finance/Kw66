@@ -76,7 +76,7 @@
       <div><div class="vlabel">Букв</div><div id="morseLetters" class="value">0</div></div>
       <div><div class="vlabel">Последнее</div><div id="morseLast" class="value">—</div></div>
     </div>
-    <div class="muted" style="margin-top:10px">Play/Pause: тап после короткой паузы = точка, после долгой = тире (порог сам подстраивается под твой темп) · Next: 1 тап = зафиксировать букву / пробел, 2 тапа = отправить · Previous: стереть незавершённую букву целиком или последнюю зафиксированную</div>
+    <div class="muted" style="margin-top:10px">Previous: точка (·) · Next: тире (−) · Play: 1 тап = буква/пробел, 2 тапа = отправить, 3 тапа = удалить</div>
     <details style="margin-top:10px"><summary>Режим отладки (тест без часов, показывает текст)</summary>
       <label><input type="checkbox" id="morseDebug" style="width:auto;display:inline-block"> Показывать расшифрованный Морзе (только для калибровки!)</label>
       <div class="row" style="margin-top:6px">
@@ -86,7 +86,9 @@
         <button id="morseSpace">пробел</button>
         <button id="morseReset">сброс</button>
         <button id="morseSend" class="good">отправить</button>
+        <button id="morseSimulateReceive" class="danger">⚠ ВРЕМЕННО: показать как входящее</button>
       </div>
+      <div class="muted" style="margin-top:6px">Гонит набранный текст прямо на подключённые часы через sendWatchText, минуя шифрование и relay — для проверки ввода/отображения без второго телефона. Убрать перед реальным использованием.</div>
       <div id="morseDebugOut" class="status" style="display:none;margin-top:8px"></div>
     </details>
   </section>

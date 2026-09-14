@@ -390,50 +390,42 @@ async function sendWatchText(text,id=0x01){
 }
 
 /* ============================================================
-   Морзе-ввод — Play/Pause: точка/тире по паузе ПЕРЕД тапом.
+   Морзе-ввод — раскладка «телеграфный ключ»: точка и тире — это
+   отдельные кнопки (крайние), Play — единственная управляющая
+   кнопка, смысл которой определяется числом тапов подряд.
 
-   Настоящая длительность нажатия недоступна (часы шлют одно
-   событие на клик, без замера hold-time — см. диагностику выше).
-   Но паузу МЕЖДУ тапами измерить можно точно, и её можно
-   использовать напрямую: раз тире физически "длиннее" точки, то и
-   пауза перед тире (пока его "выговариваешь" в голове/пальцем)
-   в среднем больше, чем перед точкой. Работает по одной кнопке —
-   один тап на элемент, без подсчёта кликов:
+   Previous:   1 тап = точка (немедленно, без задержки/окна)
+   Next:       1 тап = тире  (немедленно, без задержки/окна)
+   Play:       1 тап              = зафиксировать букву / пробел
+               2 тапа подряд      = отправить сообщение
+               3 тапа подряд      = удалить (незавершённую букву
+                                     целиком, а если её нет — последнюю
+                                     зафиксированную)
 
-   Play/Pause: тап после короткой паузы = точка
-               тап после долгой паузы   = тире
-   Next:       1 тап = если буква не завершена — зафиксировать её и перейти
-                        к следующей; если буква уже зафиксирована — пробел
-               2 тапа подряд = отправить сообщение
-   Previous:   1 тап = стереть незавершённую букву целиком, а если её нет —
-               стереть последнюю зафиксированную букву
-
-   Порог "короткая/долгая" не фиксированный: это самокалибрующаяся
-   оценка (morse.unit), которая подстраивается под фактический темп
-   именно этого человека — обновляется только по паузам, которые
-   сама же классифицировала как точку (чтобы не «уезжать» от тире).
-   Первый тап в новой букве классифицировать не по чему — по
-   умолчанию точка; дальше можно поправить через Previous.
+   Previous/Next независимы друг от друга и не привязаны к
+   предыдущему тапу — калибровка темпа не нужна, буквы, начинающиеся
+   с тире (T, N, M, O, ...), вводятся с первого раза. Задержка перед
+   срабатыванием (окно BURST_WINDOW_MS) есть только у Play, потому
+   что там нужно дождаться, не будет ли ещё тапа в серии.
    ============================================================ */
 const MORSE_EN={'.-':'A','-...':'B','-.-.':'C','-..':'D','.':'E','..-.':'F','--.':'G','....':'H','..':'I','.---':'J','-.-':'K','.-..':'L','--':'M','-.':'N','---':'O','.--.':'P','--.-':'Q','.-.':'R','...':'S','-':'T','..-':'U','...-':'V','.--':'W','-..-':'X','-.--':'Y','--..':'Z','-----':'0','.----':'1','..---':'2','...--':'3','....-':'4','.....':'5','-....':'6','--...':'7','---..':'8','----.':'9'};
 const MORSE_RU={'.-':'А','-...':'Б','.--':'В','--.':'Г','-..':'Д','.':'Е','...-':'Ж','--..':'З','..':'И','.---':'Й','-.-':'К','.-..':'Л','--':'М','-.':'Н','---':'О','.--.':'П','.-.':'Р','...':'С','-':'Т','..-':'У','..-.':'Ф','....':'Х','---.':'Ц','----':'Ч','--.-':'Ш','--.--':'Щ','-.--':'Ы','-..-':'Ь','..-..':'Э','..--':'Ю','.-.-':'Я'};
 const MORSE_MAP={...MORSE_EN,...MORSE_RU};
-const BURST_WINDOW_MS=450; // окно серии кликов Next: 1 тап = буква/пробел, 2 тапа = отправить
-const PP_BOUNCE_MS=50;     // защита от дребезга контакта
-const PP_UNIT_DEFAULT=220, PP_UNIT_MIN=80, PP_UNIT_MAX=900, PP_DASH_RATIO=1.8; // самокалибровка порога точка/тире
+const BURST_WINDOW_MS=450; // окно серии тапов Play: 1=буква/пробел, 2=отправить, 3=удалить
+const PP_BOUNCE_MS=50;     // защита от дребезга контакта на Previous/Next (точка/тире)
 
-function burstTracker(onFinalize){
+function burstTracker(onFinalize,windowMs=BURST_WINDOW_MS){
   const s={count:0,timer:null};
   return ()=>{
     s.count++;
     clearTimeout(s.timer);
-    s.timer=setTimeout(()=>{ const c=s.count; s.count=0; onFinalize(c); },BURST_WINDOW_MS);
+    s.timer=setTimeout(()=>{ const c=s.count; s.count=0; onFinalize(c); },windowMs);
   };
 }
 
 const morse={
   pattern:'', text:'', symbols:0, letters:0, debug:false,
-  lastTapT:null, unit:PP_UNIT_DEFAULT,
+  lastDotT:null, lastDashT:null,
   setState(s){ $('morseState').textContent=s; },
   ui(){ $('morseSymbols').textContent=this.symbols; $('morseLetters').textContent=this.letters; },
   dbg(s){ if(this.debug){ const el=$('morseDebugOut'); el.style.display='block'; el.textContent+=(el.textContent?'\n':'')+`[${nowStr()}] ${s}`; el.scrollTop=el.scrollHeight; } },
@@ -443,23 +435,17 @@ const morse={
     this.setState('приём'); this.ui();
     this.dbg(`элемент ${sym} pattern=${this.pattern}`);
   },
-  tapPP(){
+  // Previous/Next теперь независимые кнопки-элементы (точка/тире).
+  // Дебаунс не даёт дребезгу контакта одной физической кнопки
+  // засчитаться как два тапа подряд.
+  registerTap(kind){
     const t=performance.now();
-    if(this.lastTapT!==null && (t-this.lastTapT)<PP_BOUNCE_MS){ this.dbg('дребезг, игнор'); return; }
-    let sym;
-    if(this.lastTapT===null){
-      sym='.'; this.dbg('первый тап в букве — точка по умолчанию');
-    } else {
-      const gap=t-this.lastTapT;
-      sym=gap<this.unit*PP_DASH_RATIO?'.':'-';
-      if(sym==='.'){ this.unit=Math.min(PP_UNIT_MAX,Math.max(PP_UNIT_MIN,this.unit*0.7+gap*0.3)); }
-      this.dbg(`пауза=${Math.round(gap)}мс порог≈${Math.round(this.unit)}мс → ${sym}`);
-    }
-    this.lastTapT=t;
-    this.addElement(sym);
+    const key=kind==='dot'?'lastDotT':'lastDashT';
+    if(this[key]!==null && (t-this[key])<PP_BOUNCE_MS){ this.dbg('дребезг, игнор'); return false; }
+    this[key]=t;
+    return true;
   },
   commitLetter(){
-    this.lastTapT=null;
     if(!this.pattern) return false;
     const ch=MORSE_MAP[this.pattern]||'□';
     this.text+=ch; this.letters++;
@@ -474,14 +460,32 @@ const morse={
     $('morseLast').textContent='Пробел'; this.setState('пробел'); this.ui(); this.dbg('пробел');
   },
   deleteLast(){
-    this.lastTapT=null;
     if(this.pattern){ this.pattern=''; this.setState('удаление'); $('morseLast').textContent='⌫ буква (незаверш.)'; this.ui(); return; }
     if(this.text){ const chars=[...this.text]; chars.pop(); this.text=chars.join(''); this.letters=Math.max(0,this.letters-1); }
     this.setState('удаление'); $('morseLast').textContent='⌫ буква'; this.ui();
   },
   reset(){
-    this.pattern='';this.text='';this.symbols=0;this.letters=0;this.lastTapT=null;this.unit=PP_UNIT_DEFAULT;
+    this.pattern='';this.text='';this.symbols=0;this.letters=0;this.lastDotT=null;this.lastDashT=null;
     this.setState('ожидание');$('morseLast').textContent='—';this.ui();$('morseDebugOut').textContent='';this.dbg('reset');
+  },
+  // ВРЕМЕННО (только для тестов): отправить набранный текст прямо на
+  // те же часы через sendWatchText, минуя шифрование и relay —
+  // имитация "входящего" сообщения без второго телефона/часов.
+  // Убрать перед реальным использованием на два устройства.
+  async simulateReceive(){
+    this.commitLetter();
+    if(!this.text){ log('[ТЕСТ] Нет текста — сначала введи сообщение на часах.'); return; }
+    const text=this.text;
+    try{
+      await sendWatchText(text);
+      this.setState('тест: показано как входящее'); $('morseLast').textContent='тест-приём';
+      log(`[ТЕСТ] Отправлено на часы как имитация входящего (${text.length} симв.), без шифрования и сети.`);
+    }catch(e){
+      log(`[ТЕСТ] Ошибка: ${e.message}`);
+    }finally{
+      this.text=''; this.pattern=''; this.letters=0; this.symbols=0; this.ui();
+      setTimeout(()=>this.setState('ожидание'),900);
+    }
   },
   async send(){
     this.commitLetter();
@@ -496,28 +500,30 @@ const morse={
     }catch(e){
       log(`Ошибка отправки: ${e.message}`);
     }finally{
-      this.text=''; this.pattern=''; this.letters=0; this.symbols=0; this.lastTapT=null; this.ui();
+      this.text=''; this.pattern=''; this.letters=0; this.symbols=0; this.ui();
       setTimeout(()=>this.setState('ожидание'),900);
     }
   }
 };
 
-function finalizeNext(count){
+function finalizePlay(count){
   if(count===1){
     if(morse.pattern) morse.commitLetter();      // есть незавершённая буква — фиксируем, переходим к следующей
     else morse.addSpace();                       // буквы уже нет — значит это пробел
-  } else if(count>=2){
+  } else if(count===2){
     morse.send().catch(e=>log(`Ошибка отправки: ${e.message}`));
+  } else if(count>=3){
+    morse.deleteLast();
   }
 }
-const trackNext=burstTracker(finalizeNext);
+const trackPlay=burstTracker(finalizePlay);
 
 function handleD1(b){
   if(!b || b[0]!==0xD1 || b.length<2) return false;
   const code=b[1];
-  if(code===0x07){ morse.tapPP(); return true; }
-  if(code===0x08){ trackNext(); return true; }
-  if(code===0x09){ morse.deleteLast(); return true; } // Previous: удалить незавершённый символ/последнюю букву
+  if(code===0x09){ if(morse.registerTap('dot')) morse.addElement('.'); return true; }  // Previous: точка
+  if(code===0x08){ if(morse.registerTap('dash')) morse.addElement('-'); return true; } // Next: тире
+  if(code===0x07){ trackPlay(); return true; }                                         // Play: команда (1/2/3 тапа)
   return false;
 }
 
@@ -538,6 +544,7 @@ $('morseTestCommit').onclick=()=>morse.commitLetter();
 $('morseSpace').onclick=()=>morse.addSpace();
 $('morseReset').onclick=()=>morse.reset();
 $('morseSend').onclick=()=>morse.send();
+$('morseSimulateReceive').onclick=()=>morse.simulateReceive();
 
 $('sbSave').onclick=()=>{
   const url=$('sbUrl').value.trim(), key=$('sbKey').value.trim();
