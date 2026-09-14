@@ -411,6 +411,35 @@ async function sendWatchText(text,id=0x01){
 const MORSE_EN={'.-':'A','-...':'B','-.-.':'C','-..':'D','.':'E','..-.':'F','--.':'G','....':'H','..':'I','.---':'J','-.-':'K','.-..':'L','--':'M','-.':'N','---':'O','.--.':'P','--.-':'Q','.-.':'R','...':'S','-':'T','..-':'U','...-':'V','.--':'W','-..-':'X','-.--':'Y','--..':'Z','-----':'0','.----':'1','..---':'2','...--':'3','....-':'4','.....':'5','-....':'6','--...':'7','---..':'8','----.':'9'};
 const MORSE_RU={'.-':'А','-...':'Б','.--':'В','--.':'Г','-..':'Д','.':'Е','...-':'Ж','--..':'З','..':'И','.---':'Й','-.-':'К','.-..':'Л','--':'М','-.':'Н','---':'О','.--.':'П','.-.':'Р','...':'С','-':'Т','..-':'У','..-.':'Ф','....':'Х','---.':'Ц','----':'Ч','--.-':'Ш','--.--':'Щ','-.--':'Ы','-..-':'Ь','..-..':'Э','..--':'Ю','.-.-':'Я'};
 const MORSE_MAP={...MORSE_EN,...MORSE_RU};
+
+// Если паттерн не распознан — ищем ближайший валидный код Морзе на
+// расстоянии 1 элемент (одна замена точка<->тире, лишний или
+// пропущенный элемент). Это чинит типичные единичные ошибки набора
+// ДО словарной коррекции, без всякого UI — просто выбирается самый
+// вероятный код из уже подтверждённого алфавита.
+function nearestMorsePattern(pattern){
+  const candidates=[];
+  // замена одного элемента
+  for(let i=0;i<pattern.length;i++){
+    const flipped=pattern.slice(0,i)+(pattern[i]==='.'?'-':'.')+pattern.slice(i+1);
+    if(MORSE_MAP[flipped]) candidates.push(flipped);
+  }
+  // лишний элемент (удаляем один)
+  for(let i=0;i<pattern.length;i++){
+    const shorter=pattern.slice(0,i)+pattern.slice(i+1);
+    if(MORSE_MAP[shorter]) candidates.push(shorter);
+  }
+  // пропущенный элемент (добавляем точку или тире в каждую позицию)
+  for(let i=0;i<=pattern.length;i++){
+    for(const sym of ['.','-']){
+      const longer=pattern.slice(0,i)+sym+pattern.slice(i);
+      if(MORSE_MAP[longer]) candidates.push(longer);
+    }
+  }
+  if(!candidates.length) return null;
+  candidates.sort((a,b)=>Math.abs(a.length-pattern.length)-Math.abs(b.length-pattern.length)); // сперва замена (та же длина), затем удаление/добавление
+  return candidates[0];
+}
 const BURST_WINDOW_MS=450; // окно серии тапов Play: 1=буква/пробел, 2=отправить, 3=удалить
 const PP_BOUNCE_MS=50;     // защита от дребезга контакта на Previous/Next (точка/тире)
 
@@ -447,7 +476,12 @@ const morse={
   },
   commitLetter(){
     if(!this.pattern) return false;
-    const ch=MORSE_MAP[this.pattern]||'□';
+    let ch=MORSE_MAP[this.pattern];
+    if(!ch){
+      const fixed=nearestMorsePattern(this.pattern);
+      if(fixed){ ch=MORSE_MAP[fixed]; this.dbg(`паттерн ${this.pattern} не распознан → исправлен на ${fixed} = ${ch}`); }
+      else ch='□';
+    }
     this.text+=ch; this.letters++;
     this.dbg(`буква=${ch} (${this.pattern})`);
     this.pattern='';
@@ -465,6 +499,8 @@ const morse={
     this.setState('удаление'); $('morseLast').textContent='⌫ буква'; this.ui();
   },
   reset(){
+    if(this.pendingTimer) clearTimeout(this.pendingTimer);
+    this.pendingTimer=null; this.pendingSend=null;
     this.pattern='';this.text='';this.symbols=0;this.letters=0;this.lastDotT=null;this.lastDashT=null;
     this.setState('ожидание');$('morseLast').textContent='—';this.ui();$('morseDebugOut').textContent='';this.dbg('reset');
   },
@@ -487,22 +523,54 @@ const morse={
       setTimeout(()=>this.setState('ожидание'),900);
     }
   },
-  async send(){
+  pendingSend:null, pendingTimer:null,
+  // Play x2 запускает это вместо немедленной отправки: считаем
+  // словарную коррекцию, показываем результат на СВОИХ же часах
+  // (используя тот же sendWatchText, что и для входящих) и ждём
+  // окно PREVIEW_WINDOW_MS. Любой тап в это окно — отмена (см.
+  // cancelPendingSend/handleD1), молчание — подтверждение.
+  async requestSend(){
     this.commitLetter();
     if(!this.text) return;
     if(!identity.sessionKey){ log('Отправка невозможна: пара не установлена (см. раздел 2).'); return; }
-    const plaintext=this.text;
+    const raw=this.text;
+    const corrected=(window.KW66Dict?window.KW66Dict.correctMessage(raw):raw);
+    this.pendingSend={raw,corrected};
+    const windowMs=Math.min(6000,Math.max(2500,corrected.length*180));
     try{
-      const packet=await identity.encrypt(plaintext);
+      await sendWatchText(corrected);
+      this.dbg(`превью показано (${corrected.length} симв.), окно ${windowMs}мс; исходник не изменён до подтверждения`);
+    }catch(e){
+      log(`Ошибка предпросмотра: ${e.message}`);
+    }
+    this.setState('превью — жди или отмени тапом'); $('morseLast').textContent='превью';
+    this.pendingTimer=setTimeout(()=>this.confirmSend(),windowMs);
+  },
+  async confirmSend(){
+    if(!this.pendingSend) return;
+    const {corrected}=this.pendingSend;
+    clearTimeout(this.pendingTimer); this.pendingTimer=null; this.pendingSend=null;
+    try{
+      const packet=await identity.encrypt(corrected);
       await relay.sendCiphertext(packet);
       this.setState('отправлено'); $('morseLast').textContent='отправлено';
-      this.dbg(`отправлено, длина=${plaintext.length} символов; открытый текст нигде не сохранён`);
+      this.dbg(`отправлено, длина=${corrected.length} символов; открытый текст нигде не сохранён`);
     }catch(e){
       log(`Ошибка отправки: ${e.message}`);
     }finally{
       this.text=''; this.pattern=''; this.letters=0; this.symbols=0; this.ui();
       setTimeout(()=>this.setState('ожидание'),900);
     }
+  },
+  // Любой тап во время превью зовёт это: возвращаем ИСХОДНЫЙ
+  // (нескорректированный) текст в буфер для ручной правки — если
+  // словарь угадал неверно, автокоррекция не должна тебе мешать.
+  cancelPendingSend(){
+    if(!this.pendingSend) return false;
+    clearTimeout(this.pendingTimer); this.pendingTimer=null;
+    this.text=this.pendingSend.raw; this.pendingSend=null;
+    this.setState('приём'); this.ui(); this.dbg('превью отменено, возвращён исходный текст');
+    return true;
   }
 };
 
@@ -511,7 +579,7 @@ function finalizePlay(count){
     if(morse.pattern) morse.commitLetter();      // есть незавершённая буква — фиксируем, переходим к следующей
     else morse.addSpace();                       // буквы уже нет — значит это пробел
   } else if(count===2){
-    morse.send().catch(e=>log(`Ошибка отправки: ${e.message}`));
+    morse.requestSend().catch(e=>log(`Ошибка отправки: ${e.message}`));
   } else if(count>=3){
     morse.deleteLast();
   }
@@ -521,6 +589,7 @@ const trackPlay=burstTracker(finalizePlay);
 function handleD1(b){
   if(!b || b[0]!==0xD1 || b.length<2) return false;
   const code=b[1];
+  if(morse.pendingSend){ morse.cancelPendingSend(); return true; } // любой тап во время превью — отмена, действие нужно повторить
   if(code===0x09){ if(morse.registerTap('dot')) morse.addElement('.'); return true; }  // Previous: точка
   if(code===0x08){ if(morse.registerTap('dash')) morse.addElement('-'); return true; } // Next: тире
   if(code===0x07){ trackPlay(); return true; }                                         // Play: команда (1/2/3 тапа)
@@ -543,7 +612,7 @@ $('morseTestDash').onclick=()=>morse.addElement('-');
 $('morseTestCommit').onclick=()=>morse.commitLetter();
 $('morseSpace').onclick=()=>morse.addSpace();
 $('morseReset').onclick=()=>morse.reset();
-$('morseSend').onclick=()=>morse.send();
+$('morseSend').onclick=()=>morse.requestSend();
 $('morseSimulateReceive').onclick=()=>morse.simulateReceive();
 
 $('sbSave').onclick=()=>{

@@ -1,5 +1,5 @@
-const CACHE = "kw66msg-v4";
-const SHELL = ["./", "./index.html", "./app.js", "./manifest.json"];
+const CACHE = "kw66msg-v5";
+const SHELL = ["./", "./index.html", "./app.js", "./dict.js", "./manifest.json"];
 
 self.addEventListener("install", e => {
   e.waitUntil(caches.open(CACHE).then(c => c.addAll(SHELL)));
