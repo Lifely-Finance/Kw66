@@ -1,18 +1,326 @@
-<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="theme-color" content="#0b1020"><link rel="manifest" href="manifest.json"><title>KW66 Touch Recorder</title><style>
-:root{color-scheme:dark;font-family:system-ui,-apple-system,Segoe UI,sans-serif}body{margin:0;background:#0b1020;color:#eef2ff}main{max-width:900px;margin:auto;padding:18px}h1{font-size:25px;margin:0 0 5px}h2{font-size:17px;margin:0 0 10px}.muted{color:#9ca3af;font-size:13px}.card{background:#151c2f;border:1px solid #29334d;border-radius:14px;padding:15px;margin:12px 0}.row{display:flex;flex-wrap:wrap;gap:6px;align-items:center}button{border:0;border-radius:10px;padding:11px 14px;margin:2px;background:#26334f;color:#fff;font-weight:650}button.primary{background:#2563eb}button.good{background:#047857}button.danger{background:#b91c1c}button:disabled{opacity:.45}.pill{display:inline-block;padding:4px 10px;border-radius:99px;background:#26334f;font-size:12px}.pill.run{background:#047857}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}.value{font-size:24px;font-weight:700}.label{font-size:12px;color:#9ca3af}.status{font:12px ui-monospace,monospace;white-space:pre-wrap;max-height:300px;overflow:auto;background:#090d18;border-radius:9px;padding:10px}table{width:100%;border-collapse:collapse;font:12px ui-monospace,monospace}th,td{text-align:left;padding:5px;border-bottom:1px solid #29334d}th{color:#9ca3af}.scroll{max-height:430px;overflow:auto}.accent{font-weight:700}.small{font-size:12px}@media(max-width:600px){main{padding:12px}}
-</style></head><body><main>
-<h1>KW66 Touch Recorder <span class="muted">v1.0</span></h1>
-<div class="muted">Экспериментальный регистратор Touch Recognition. Никакого Морзе и никаких команд на часы: только входящий BLE и анализ последовательности касаний.</div>
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#111827">
+  <link rel="manifest" href="manifest.json">
+  <title>KW66 Lab v3.8</title>
+  <style>
+    :root{color-scheme:dark;font-family:system-ui,-apple-system,Segoe UI,sans-serif}
+    body{margin:0;background:#0b1020;color:#eef2ff}
+    main{max-width:960px;margin:auto;padding:18px}
+    h1{font-size:25px;margin:0 0 4px} h2{font-size:17px;margin:0 0 12px}
+    .muted{color:#9ca3af;font-size:13px}
+    .card{background:#151c2f;border:1px solid #29334d;border-radius:14px;padding:15px;margin:12px 0}
+    button{border:0;border-radius:10px;padding:11px 14px;margin:4px;background:#26334f;color:#fff;font-weight:600;cursor:pointer}
+    button.primary{background:#2563eb} button.warn{background:#7c3aed} button.good{background:#047857} button.danger{background:#b91c1c}
+    button:disabled{opacity:.45;cursor:default}
+    .row{display:flex;flex-wrap:wrap;gap:5px;align-items:center}
+    .status{font-family:ui-monospace,monospace;font-size:13px;white-space:pre-wrap;max-height:260px;overflow:auto;background:#090d18;border-radius:9px;padding:10px}
+    .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}
+    .value{font-size:24px;font-weight:700}.label{color:#9ca3af;font-size:12px}
+    input,select,textarea{background:#0b1020;color:#fff;border:1px solid #35415e;border-radius:8px;padding:10px;width:100%;box-sizing:border-box;font-family:inherit}
+    textarea{font-family:ui-monospace,monospace;font-size:12px;min-height:110px}
+    code{font-family:ui-monospace,monospace;font-size:12px;word-break:break-all}
+    .ok{color:#6ee7b7}.bad{color:#fca5a5}.warn-t{color:#fbbf24}
+    table.tbl{width:100%;border-collapse:collapse;font-family:ui-monospace,monospace;font-size:12px}
+    table.tbl th{color:#9ca3af;text-align:left;padding:4px;border-bottom:1px solid #29334d}
+    table.tbl td{padding:4px;border-bottom:1px solid #1c2438;vertical-align:top}
+    .scroll{max-height:340px;overflow:auto}
+    canvas.chart{width:100%;height:170px;background:#090d18;border-radius:9px;display:block}
+    .pill{display:inline-block;padding:2px 10px;border-radius:99px;font-size:12px;font-weight:700;background:#26334f}
+    .pill.run{background:#047857}.pill.hot{background:#b91c1c}
+    /* дыхательный оверлей 4-7-8 */
+    #breathe{position:fixed;inset:0;background:rgba(5,8,18,.94);display:none;align-items:center;justify-content:center;flex-direction:column;z-index:50}
+    #breathe.on{display:flex}
+    #bcircle{width:180px;height:180px;border-radius:50%;background:radial-gradient(circle at 35% 35%,#60a5fa,#2563eb 60%,#1e3a8a);transition:transform 4s ease-in-out;box-shadow:0 0 60px #2563eb88}
+    #bphase{font-size:26px;font-weight:700;margin-top:34px}
+    #bhr{font-size:16px;color:#9ca3af;margin-top:8px}
+    .two{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+    @media(max-width:720px){.two{grid-template-columns:1fr}}
+  </style>
+</head>
+<body>
+<main>
+  <h1>KW66 Lab <span class="muted">v3.8</span></h1>
+  <div class="muted">GloryFit BLE — protocol lab + HR-аналитика + motion probe + фаззер + btsnoop-парсер</div>
 
-<section class="card"><h2>1. Подключение</h2><div class="row"><button id="connect" class="primary">Найти и подключить</button><button id="disconnect">Отключить</button><button id="clear">Очистить</button><button id="export" class="good">Экспорт JSON</button></div><div id="device" class="muted" style="margin-top:8px">Устройство не подключено</div><div class="small" style="margin-top:5px">RX: <span id="rxChar">—</span></div></section>
+  <section class="card">
+    <h2>1. Подключение</h2>
+    <div class="row">
+      <button id="connect" class="primary">Найти и подключить</button>
+      <button id="disconnect">Отключить</button>
+      <button id="clear">Очистить лог</button>
+      <button id="export">Экспорт JSON</button>
+    </div>
+    <div id="device" class="muted">Устройство не подключено</div>
+    <div class="muted" style="margin-top:6px">
+      TX: <code id="txChar">—</code> · RX: <code id="rxChar">—</code>
+      · Батарея: <span id="batVal" class="value" style="font-size:16px">—</span>%
+      · Шаги (B1): <span id="stepsVal" class="value" style="font-size:16px">—</span>
+    </div>
+  </section>
 
-<section class="card"><h2>2. Запись касаний</h2><div class="muted" style="margin-bottom:9px">Нажми «Начать запись», затем по отдельности выполни короткое и длинное нажатие Play/Pause, Next и Previous. Между экспериментами делай паузу 3–5 секунд. После каждого действия смотри таблицу — приложение пока ничего не интерпретирует заранее.</div><div class="row"><button id="record" class="good">● Начать запись</button><button id="mark" disabled>Метка</button><button id="stop" disabled>■ Стоп</button><span id="state" class="pill">ожидание</span></div></section>
+  <section class="card">
+    <h2>2. Live пульс (E5 11 …)</h2>
+    <div class="row" style="margin-bottom:8px">
+      <button id="hrReq">❤️ Отправить E5 00 (проба)</button>
+      <span class="pill" id="hrPill">нет потока</span>
+      <span class="muted">Поток появляется только если замер запущен на часах — v3 отображает и считает по нему.</span>
+    </div>
+    <canvas id="hrChart" class="chart"></canvas>
+    <div class="grid" style="margin-top:10px">
+      <div><div class="label">Сейчас</div><div id="hrNow" class="value">—</div></div>
+      <div><div class="label">Мин / Макс (окно 5 мин)</div><div id="hrMinMax" class="value" style="font-size:16px">—</div></div>
+      <div><div class="label">Среднее</div><div id="hrAvg" class="value" style="font-size:16px">—</div></div>
+      <div><div class="label">Пакетов HR</div><div id="hrCount" class="value" style="font-size:16px">0</div></div>
+    </div>
+  </section>
 
-<section class="card"><h2>3. Живой разбор</h2><div class="grid"><div><div class="label">D1 событий</div><div id="d1count" class="value">0</div></div><div><div class="label">07 Play/Pause</div><div id="c07" class="value">0</div></div><div><div class="label">08 Next</div><div id="c08" class="value">0</div></div><div><div class="label">09 Previous</div><div id="c09" class="value">0</div></div><div><div class="label">Последний Δ</div><div id="delta" class="value" style="font-size:18px">—</div></div></div><div id="last" class="status" style="margin-top:10px">Ожидание D1…</div></section>
+  <section class="card">
+    <h2>3. Тест восстановления (перетрен) <span class="muted">— на то, что есть в часах</span></h2>
+    <div class="muted" style="margin-bottom:8px">Сразу после остановки тренировки нажми «Старт»: 60 секунд тишины, потом вердикт по падению пульса.</div>
+    <div class="row">
+      <button id="recStart" class="good">▶ Старт (сразу после нагрузки)</button>
+      <button id="recCancel" disabled>Отмена</button>
+      <span class="pill" id="recPill">ожидание</span>
+    </div>
+    <div class="grid" style="margin-top:10px">
+      <div><div class="label">Пульс на пике</div><div id="recPeak" class="value">—</div></div>
+      <div><div class="label">Через 60 с</div><div id="recAfter" class="value">—</div></div>
+      <div><div class="label">Падение</div><div id="recDrop" class="value">—</div></div>
+      <div><div class="label">Вердикт</div><div id="recVerdict" class="value" style="font-size:15px">—</div></div>
+    </div>
+    <div id="recTimer" class="muted" style="margin-top:6px"></div>
+  </section>
 
-<section class="card"><h2>4. Записанные события</h2><div class="scroll"><table><thead><tr><th>#</th><th>Время</th><th>Δ</th><th>HEX</th><th>Действие</th><th>Запись</th></tr></thead><tbody id="rows"></tbody></table></div></section>
+  <section class="card">
+    <h2>4. Стресс-монитор <span class="muted">v1: пульс ↑ + шаги стоят</span></h2>
+    <div class="muted" style="margin-bottom:8px">Логика: пульс &gt; 100 bpm дольше 3 минут И шаги не растут = похоже на стресс, а не нагрузку. При срабатывании — экран дыхания 4-7-8 с живым пульсом.</div>
+    <div class="row">
+      <button id="stressToggle">Включить монитор</button>
+      <span class="pill" id="stressPill">выкл</span>
+    </div>
+    <div id="stressMsg" class="muted" style="margin-top:6px"></div>
+    <div class="row" style="margin-top:6px">
+      <button id="breatheOpen" class="warn">🫁 Дыхание 4-7-8 (вручную)</button>
+    </div>
+  </section>
 
-<section class="card"><h2>5. Сырые RX</h2><div class="muted" style="margin-bottom:7px">Здесь сохраняются все входящие пакеты во время записи. Это важнее автоматической классификации: по этим данным мы восстановим настоящий алгоритм Hello Imilab.</div><div id="raw" class="status">—</div></section>
+  <section class="card">
+    <h2>5. Детектор «вруна» <span class="muted">— шуточный, чисто по пульсу</span></h2>
+    <div class="row">
+      <button id="lieStart" class="good">Снять базовую линию (10 с)</button>
+      <button id="lieAsk" disabled>Вопрос задан → измерить реакцию</button>
+    </div>
+    <div id="lieMsg" class="muted" style="margin-top:8px"></div>
+    <div class="grid" style="margin-top:8px">
+      <div><div class="label">База (ср/макс)</div><div id="lieBase" class="value" style="font-size:16px">—</div></div>
+      <div><div class="label">Реакция (макс)</div><div id="lieSpike" class="value" style="font-size:16px">—</div></div>
+      <div><div class="label">Вердикт</div><div id="lieVerdict" class="value" style="font-size:15px">—</div></div>
+    </div>
+  </section>
 
-<section class="card"><h2>Инструкция эксперимента</h2><ol class="small"><li>Подключи KW66.</li><li>Нажми «Начать запись».</li><li>Сделай <b>короткий Play/Pause</b>, подожди 3–5 с.</li><li>Сделай <b>длинный Play/Pause</b>, подожди 3–5 с.</li><li>Повтори короткий и длинный ещё по 2 раза.</li><li>То же самое сделай с Next и Previous.</li><li>Нажми «Стоп» и «Экспорт JSON».</li></ol><div class="muted">Пока не нужно пытаться вводить слова Морзе. Нам нужны чистые образцы жестов.</div></section>
-</main><script src="app.js"></script></body></html>
+  <section class="card" id="morseCard">
+    <h2>7. Morse Messenger <span class="muted">— stealth prototype</span></h2>
+    <div class="muted" style="margin-bottom:8px">
+      KW66 становится физической клавиатурой. <b>Previous (D1 09)=точка</b>,
+      <b>Play/Pause (D1 07)=тире</b>, <b>Next (D1 08)=закончить букву</b>.
+      Сообщение не выводится на экран телефона. Внутри браузера оно сразу
+      превращается в текст, шифруется AES-256-GCM и готовится к передаче.
+    </div>
+    <div class="grid">
+      <div><div class="label">Состояние</div><div id="morseState" class="value" style="font-size:18px">ожидание</div></div>
+      <div><div class="label">Символов принято</div><div id="morseSymbols" class="value" style="font-size:18px">0</div></div>
+      <div><div class="label">Букв собрано</div><div id="morseLetters" class="value" style="font-size:18px">0</div></div>
+      <div><div class="label">Последнее событие</div><div id="morseLast" class="value" style="font-size:15px">—</div></div>
+    </div>
+    <div class="row" style="margin-top:8px">
+      <button id="morseTestDot">· Test</button>
+      <button id="morseTestDash">− Test</button>
+      <button id="morseTestCommit" class="primary">Next = буква</button>
+      <button id="morseSpace">Пробел</button>
+      <button id="morseSend" class="good">Отправить</button>
+      <button id="morseReset" class="danger">Сброс</button>
+    </div>
+    <div class="two" style="margin-top:8px">
+      <div>
+        <div class="muted">Код приглашения второго устройства</div>
+        <input id="morseInvite" placeholder="вставь код приглашения" autocomplete="off" spellcheck="false">
+        <button id="morsePair" class="primary">Связать устройства</button>
+      </div>
+      <div>
+        <div class="muted">Безопасный статус</div>
+        <div id="morseSecurity" class="status" style="min-height:54px;max-height:120px">Ключи не созданы</div>
+      </div>
+    </div>
+    <div class="muted" style="margin-top:8px">
+      По умолчанию диагностический текст скрыт. Для разработки можно включить
+      <label style="display:inline-flex;align-items:center;gap:6px;margin-left:6px"><input id="morseDebug" type="checkbox" style="width:auto"> debug</label>.
+    </div>
+    <div id="morseDebugOut" class="status" style="display:none;margin-top:8px;max-height:180px"></div>
+  </section>
+
+  <section class="card">
+    <h2>6. Command Lab</h2>
+    <div class="row">
+      <button id="battery">🔋 Battery — A2</button>
+      <button id="steps">🚶 Шаги — B2 FA</button>
+    </div>
+    <div class="two" style="margin-top:8px">
+      <div>
+        <div class="muted" style="margin-bottom:4px">Куда отправлять:</div>
+        <select id="txSelect"></select>
+      </div>
+      <div>
+        <div class="muted" style="margin-bottom:4px">Произвольная команда (HEX):</div>
+        <input id="custom" placeholder="Например: A2 или E5 01">
+      </div>
+    </div>
+    <div class="row"><button id="sendCustom" class="warn" disabled>Отправить HEX</button></div>
+  </section>
+
+  <section class="card">
+    <h2>6b. Текст на часы <span class="muted">— opcode 0xC5</span></h2>
+    <div class="muted" style="margin-bottom:6px">
+      Реконструировано и уточнено по обратной связи с реального железа: у сообщения
+      есть заголовок <code>id</code> (категория) + <code>len</code> (длина текста в байтах,
+      считается автоматически). <b>id=0x00 на реальных часах показывает экран входящего
+      звонка</b> (иконка сброса, тап гасит экран) — если не хочешь такое поведение, оставляй
+      ненулевой id. Формат в целом ещё не до конца проверен — сообщай, если что-то не так.
+    </div>
+    <div class="two">
+      <div>
+        <div class="muted" style="margin-bottom:4px">Текст:</div>
+        <textarea id="watchText" placeholder="Текст для отображения на часах…">Привет с телефона!</textarea>
+      </div>
+      <div>
+        <div class="muted" style="margin-bottom:4px">id категории (HEX, не 00):</div>
+        <input id="watchTextId" value="01" placeholder="01">
+      </div>
+    </div>
+    <div class="row" style="margin-top:8px">
+      <button id="sendWatchText" class="warn" disabled>Отправить текст (0xC5)</button>
+    </div>
+  </section>
+
+
+  <section class="card">
+    <h2>6c. KW66 Protocol Lab <span class="muted">— чистый Motion Sniffer</span></h2>
+    <div class="muted" style="margin-bottom:8px">
+      Режим v3.6 не отправляет команды во время эксперимента и не создаёт искусственный A2-трафик.
+      Записывается весь входящий RX с миллисекундным временем. Цель — найти пакеты, которые появляются только при движении.
+    </div>
+    <div class="grid" style="margin-bottom:10px">
+      <div><div class="label">Основной TX</div><div id="protoTx" class="value" style="font-size:15px">—</div></div>
+      <div><div class="label">Основной RX</div><div id="protoRx" class="value" style="font-size:15px">—</div></div>
+      <div><div class="label">RX пакетов</div><div id="protoRxCount" class="value" style="font-size:15px">0</div></div>
+      <div><div class="label">Уникальных opcode</div><div id="motionCount" class="value" style="font-size:15px">0</div></div>
+    </div>
+    <div class="two">
+      <div>
+        <div class="muted" style="margin-bottom:4px">Безопасные запросы — только вне эксперимента</div>
+        <div class="row">
+          <button id="protoA1">A1 — модель/серийник</button>
+          <button id="protoA2">A2 — батарея</button>
+          <button id="protoA3">A3 — время</button>
+          <button id="protoB2">B2 FA — история шагов</button>
+        </div>
+      </div>
+      <div>
+        <div class="muted" style="margin-bottom:4px">Старые экспериментальные команды</div>
+        <div class="row">
+          <button id="motionC401" class="warn">C4 01</button>
+          <button id="motionC402" class="warn">C4 02</button>
+          <button id="motionC403" class="warn">C4 03</button>
+          <button id="motionD700" class="warn">D7 00</button>
+          <button id="motionD701" class="warn">D7 01</button>
+          <button id="motionD702" class="warn">D7 02</button>
+        </div>
+      </div>
+    </div>
+    <div class="row" style="margin-top:8px">
+      <button id="motionSniff" class="primary">▶ Sniffer 60 с</button>
+      <button id="motionRest" class="primary" disabled>REST</button>
+      <button id="motionMove" class="primary" disabled>MOVE</button>
+      <button id="motionShake" class="warn" disabled>SHAKE</button>
+      <button id="motionExport">Экспорт JSON</button>
+      <button id="motionClear">Очистить</button>
+      <span class="pill" id="motionPill">готов</span>
+    </div>
+    <div id="motionOut" class="scroll" style="margin-top:10px"></div>
+    <div class="muted" style="margin-top:8px">
+      Порядок теста: нажми <b>Sniffer 60 с</b>. Первые ~15 с держи часы неподвижно → нажми <b>MOVE</b> и активно двигай рукой 15 с → нажми <b>REST</b> на 15 с → нажми <b>SHAKE</b> и резко потряси 15 с.
+      Маркеры можно нажимать в любой момент. <b>CB</b> и <b>31</b> остаются только RX-кандидатами; приложение их не отправляет.
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>7. Фаззер команд <span class="muted">— поиск живых опкодов</span></h2>
+    <div class="muted" style="margin-bottom:8px">
+      Шлёт команды по очереди и слушает, что прилетит НЕ из периодики (A2/F7/B1 игнорируются).
+      Кандидаты — гипотезы из семейства протоколов DaFit/GloryFit: HR-старт, binding, вибрация. Строки с # — комментарии.
+    </div>
+    <textarea id="fuzzList" spellcheck="false"># HR-старт?
+E5 01
+E5 02
+E5 03
+E5 10
+# binding / init?
+2F 00
+90 00
+01 00
+15 01
+15 02
+# вибрация?
+35 01
+51 01
+51 02
+5B 01
+73 01</textarea>
+    <div class="two" style="margin-top:8px">
+      <div><div class="muted">Пауза после команды, мс (слушаем ответ)</div><input id="fuzzWindow" type="number" value="1500"></div>
+      <div><div class="muted">Пауза между командами, мс</div><input id="fuzzInterval" type="number" value="400"></div>
+    </div>
+    <div class="row" style="margin-top:8px">
+      <button id="fuzzRun" class="primary">▶ Запустить фаззер</button>
+      <button id="fuzzStop" class="danger" disabled>■ Стоп</button>
+      <span class="pill" id="fuzzPill">готов</span>
+    </div>
+    <div id="fuzzOut" class="scroll" style="margin-top:10px"></div>
+  </section>
+
+  <section class="card">
+    <h2>8. btsnoop-парсер <span class="muted">— что шлёт официальное приложение</span></h2>
+    <div class="muted" style="margin-bottom:8px">
+      Включи «Bluetooth HCI snoop log» в настройках разработчика Android → поработай с часами через GloryFit → вытащи
+      <code>btsnoop_hci.log</code> (или bugreport) → загони файл сюда. Парсер покажет все ATT-записи, соберёт handle→UUID
+      и выделит уникальные команды, которые приложение отправляет часам — включая init-последовательность при коннекте.
+    </div>
+    <input id="snoopFile" type="file" accept="*/*">
+    <div id="snoopSummary" style="margin-top:10px"></div>
+    <div class="row" style="margin-top:8px">
+      <label class="muted" style="display:flex;gap:6px;align-items:center;width:auto"><input type="checkbox" id="snoopGF" checked style="width:auto"> только GloryFit-каналы</label>
+      <input id="snoopFilter" placeholder="фильтр по HEX, напр. E5" style="max-width:220px">
+      <button id="snoopExport" disabled>Экспорт разбора JSON</button>
+    </div>
+    <div id="snoopOut" class="scroll" style="margin-top:10px"></div>
+  </section>
+
+  <section class="card">
+    <h2>9. RAW BLE log</h2>
+    <div id="log" class="status"></div>
+  </section>
+</main>
+
+<div id="breathe">
+  <div id="bcircle"></div>
+  <div id="bphase"></div>
+  <div id="bhr"></div>
+  <button id="breatheClose" class="danger" style="margin-top:26px">Закончить</button>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>
