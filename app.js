@@ -390,50 +390,101 @@ async function sendWatchText(text,id=0x01){
 }
 
 /* ============================================================
-   Морзе-ввод (без изменений в логике распознавания из v3.13,
-   диагностика/тестовые кнопки оставлены только в свёрнутом details)
+   Морзе-ввод — Play/Pause: точка/тире по паузе ПЕРЕД тапом.
+
+   Настоящая длительность нажатия недоступна (часы шлют одно
+   событие на клик, без замера hold-time — см. диагностику выше).
+   Но паузу МЕЖДУ тапами измерить можно точно, и её можно
+   использовать напрямую: раз тире физически "длиннее" точки, то и
+   пауза перед тире (пока его "выговариваешь" в голове/пальцем)
+   в среднем больше, чем перед точкой. Работает по одной кнопке —
+   один тап на элемент, без подсчёта кликов:
+
+   Play/Pause: тап после короткой паузы = точка
+               тап после долгой паузы   = тире
+   Next:       1 тап = если буква не завершена — зафиксировать её и перейти
+                        к следующей; если буква уже зафиксирована — пробел
+               2 тапа подряд = отправить сообщение
+   Previous:   1 тап = стереть незавершённую букву целиком, а если её нет —
+               стереть последнюю зафиксированную букву
+
+   Порог "короткая/долгая" не фиксированный: это самокалибрующаяся
+   оценка (morse.unit), которая подстраивается под фактический темп
+   именно этого человека — обновляется только по паузам, которые
+   сама же классифицировала как точку (чтобы не «уезжать» от тире).
+   Первый тап в новой букве классифицировать не по чему — по
+   умолчанию точка; дальше можно поправить через Previous.
    ============================================================ */
 const MORSE_EN={'.-':'A','-...':'B','-.-.':'C','-..':'D','.':'E','..-.':'F','--.':'G','....':'H','..':'I','.---':'J','-.-':'K','.-..':'L','--':'M','-.':'N','---':'O','.--.':'P','--.-':'Q','.-.':'R','...':'S','-':'T','..-':'U','...-':'V','.--':'W','-..-':'X','-.--':'Y','--..':'Z','-----':'0','.----':'1','..---':'2','...--':'3','....-':'4','.....':'5','-....':'6','--...':'7','---..':'8','----.':'9'};
 const MORSE_RU={'.-':'А','-...':'Б','.--':'В','--.':'Г','-..':'Д','.':'Е','...-':'Ж','--..':'З','..':'И','.---':'Й','-.-':'К','.-..':'Л','--':'М','-.':'Н','---':'О','.--.':'П','.-.':'Р','...':'С','-':'Т','..-':'У','..-.':'Ф','....':'Х','---.':'Ц','----':'Ч','--.-':'Ш','--.--':'Щ','-.--':'Ы','-..-':'Ь','..-..':'Э','..--':'Ю','.-.-':'Я'};
 const MORSE_MAP={...MORSE_EN,...MORSE_RU};
-const MORSE_HOLD_MS=1200, MORSE_LONG_SUPPRESS_MS=1300, MORSE_DOUBLE_MS=550;
+const BURST_WINDOW_MS=450; // окно серии кликов Next: 1 тап = буква/пробел, 2 тапа = отправить
+const PP_BOUNCE_MS=50;     // защита от дребезга контакта
+const PP_UNIT_DEFAULT=220, PP_UNIT_MIN=80, PP_UNIT_MAX=900, PP_DASH_RATIO=1.8; // самокалибровка порога точка/тире
+
+function burstTracker(onFinalize){
+  const s={count:0,timer:null};
+  return ()=>{
+    s.count++;
+    clearTimeout(s.timer);
+    s.timer=setTimeout(()=>{ const c=s.count; s.count=0; onFinalize(c); },BURST_WINDOW_MS);
+  };
+}
 
 const morse={
   pattern:'', text:'', symbols:0, letters:0, debug:false,
-  pendingPlay:null, pendingNext:null, playTimer:null, nextTimer:null, playSuppressUntil:0,
+  lastTapT:null, unit:PP_UNIT_DEFAULT,
   setState(s){ $('morseState').textContent=s; },
   ui(){ $('morseSymbols').textContent=this.symbols; $('morseLetters').textContent=this.letters; },
   dbg(s){ if(this.debug){ const el=$('morseDebugOut'); el.style.display='block'; el.textContent+=(el.textContent?'\n':'')+`[${nowStr()}] ${s}`; el.scrollTop=el.scrollHeight; } },
-  event(kind,source='test'){
-    if(kind==='dot') this.pattern+='.';
-    else if(kind==='dash') this.pattern+='-';
-    else if(kind==='commit'){
-      if(!this.pattern) return;
-      const ch=MORSE_MAP[this.pattern]||'□';
-      this.text+=ch; this.letters++; this.pattern='';
-      this.dbg(`letter=${ch}`);
+  addElement(sym){
+    this.pattern+=sym; this.symbols++;
+    $('morseLast').textContent=sym==='.'?'·':'−';
+    this.setState('приём'); this.ui();
+    this.dbg(`элемент ${sym} pattern=${this.pattern}`);
+  },
+  tapPP(){
+    const t=performance.now();
+    if(this.lastTapT!==null && (t-this.lastTapT)<PP_BOUNCE_MS){ this.dbg('дребезг, игнор'); return; }
+    let sym;
+    if(this.lastTapT===null){
+      sym='.'; this.dbg('первый тап в букве — точка по умолчанию');
+    } else {
+      const gap=t-this.lastTapT;
+      sym=gap<this.unit*PP_DASH_RATIO?'.':'-';
+      if(sym==='.'){ this.unit=Math.min(PP_UNIT_MAX,Math.max(PP_UNIT_MIN,this.unit*0.7+gap*0.3)); }
+      this.dbg(`пауза=${Math.round(gap)}мс порог≈${Math.round(this.unit)}мс → ${sym}`);
     }
-    this.symbols++; $('morseLast').textContent=kind==='dot'?'·':kind==='dash'?'−':'Next';
-    this.setState(kind==='commit'?'буква принята':'приём'); this.ui();
-    this.dbg(`event ${kind} (${source}) pattern=${this.pattern||'∅'}`);
+    this.lastTapT=t;
+    this.addElement(sym);
+  },
+  commitLetter(){
+    this.lastTapT=null;
+    if(!this.pattern) return false;
+    const ch=MORSE_MAP[this.pattern]||'□';
+    this.text+=ch; this.letters++;
+    this.dbg(`буква=${ch} (${this.pattern})`);
+    this.pattern='';
+    $('morseLast').textContent=ch; this.setState('буква принята'); this.ui();
+    return true;
+  },
+  addSpace(){
+    this.commitLetter();
+    if(this.text && !this.text.endsWith(' ')){ this.text+=' '; this.letters++; this.symbols++; }
+    $('morseLast').textContent='Пробел'; this.setState('пробел'); this.ui(); this.dbg('пробел');
   },
   deleteLast(){
-    if(this.pattern){ this.pattern=''; this.setState('удаление'); $('morseLast').textContent='⌫ буква'; this.ui(); return; }
+    this.lastTapT=null;
+    if(this.pattern){ this.pattern=''; this.setState('удаление'); $('morseLast').textContent='⌫ буква (незаверш.)'; this.ui(); return; }
     if(this.text){ const chars=[...this.text]; chars.pop(); this.text=chars.join(''); this.letters=Math.max(0,this.letters-1); }
     this.setState('удаление'); $('morseLast').textContent='⌫ буква'; this.ui();
   },
-  space(){
-    if(!this.text && !this.pattern) return;
-    if(this.pattern) this.event('commit','auto before space');
-    if(this.text && !this.text.endsWith(' ')){ this.text+=' '; this.letters++; this.symbols++; }
-    $('morseLast').textContent='Пробел'; this.setState('пробел'); this.ui(); this.dbg('Next short → space');
-  },
   reset(){
-    clearTimeout(this.playTimer); clearTimeout(this.nextTimer);
-    this.pendingPlay=null; this.pendingNext=null;
-    this.pattern='';this.text='';this.symbols=0;this.letters=0;this.setState('ожидание');$('morseLast').textContent='—';this.ui();$('morseDebugOut').textContent='';this.dbg('reset');
+    this.pattern='';this.text='';this.symbols=0;this.letters=0;this.lastTapT=null;this.unit=PP_UNIT_DEFAULT;
+    this.setState('ожидание');$('morseLast').textContent='—';this.ui();$('morseDebugOut').textContent='';this.dbg('reset');
   },
   async send(){
+    this.commitLetter();
     if(!this.text) return;
     if(!identity.sessionKey){ log('Отправка невозможна: пара не установлена (см. раздел 2).'); return; }
     const plaintext=this.text;
@@ -445,44 +496,29 @@ const morse={
     }catch(e){
       log(`Ошибка отправки: ${e.message}`);
     }finally{
-      this.text=''; this.pattern=''; this.letters=0; this.symbols=0; this.ui();
+      this.text=''; this.pattern=''; this.letters=0; this.symbols=0; this.lastTapT=null; this.ui();
       setTimeout(()=>this.setState('ожидание'),900);
     }
   }
 };
 
+function finalizeNext(count){
+  if(count===1){
+    if(morse.pattern) morse.commitLetter();      // есть незавершённая буква — фиксируем, переходим к следующей
+    else morse.addSpace();                       // буквы уже нет — значит это пробел
+  } else if(count>=2){
+    morse.send().catch(e=>log(`Ошибка отправки: ${e.message}`));
+  }
+}
+const trackNext=burstTracker(finalizeNext);
+
 function handleD1(b){
   if(!b || b[0]!==0xD1 || b.length<2) return false;
   const code=b[1];
-  if(code!==0x07 && code!==0x08 && code!==0x09) return false;
-  const t=performance.now();
-
-  if(code===0x07){ // Play/Pause: короткое=точка, длинное=тире
-    if(t<morse.playSuppressUntil){ morse.dbg('D1 07 игнор (повтор long-press)'); return true; }
-    if(morse.pendingPlay && (t-morse.pendingPlay.at)<=MORSE_HOLD_MS){
-      clearTimeout(morse.playTimer); morse.pendingPlay=null;
-      morse.playSuppressUntil=t+MORSE_LONG_SUPPRESS_MS;
-      morse.event('dash','KW66 D1 07 long');
-      return true;
-    }
-    if(morse.pendingPlay){ clearTimeout(morse.playTimer); morse.pendingPlay=null; }
-    morse.pendingPlay={at:t};
-    morse.playTimer=setTimeout(()=>{ if(!morse.pendingPlay) return; morse.pendingPlay=null; morse.event('dot','KW66 D1 07 short'); },MORSE_HOLD_MS);
-    return true;
-  }
-  if(code===0x08){ // Next: пусто=пробел, дважды=отправить
-    if(morse.pendingNext && (t-morse.pendingNext.at)<=MORSE_DOUBLE_MS){
-      clearTimeout(morse.nextTimer); morse.pendingNext=null;
-      morse.send().catch(e=>log(`Ошибка отправки: ${e.message}`));
-      return true;
-    }
-    if(morse.pendingNext){ clearTimeout(morse.nextTimer); morse.pendingNext=null; }
-    morse.pendingNext={at:t};
-    morse.nextTimer=setTimeout(()=>{ if(!morse.pendingNext) return; morse.pendingNext=null; morse.space(); },MORSE_DOUBLE_MS);
-    return true;
-  }
-  morse.deleteLast(); // Previous: удалить незавершённый символ/последнюю букву
-  return true;
+  if(code===0x07){ morse.tapPP(); return true; }
+  if(code===0x08){ trackNext(); return true; }
+  if(code===0x09){ morse.deleteLast(); return true; } // Previous: удалить незавершённый символ/последнюю букву
+  return false;
 }
 
 /* ============================================================
@@ -496,10 +532,10 @@ $('rawRecToggle').onchange=e=>{ rawRec.enabled=e.target.checked; if(rawRec.enabl
 $('rawRecClear').onclick=()=>rawRec.clear();
 
 $('morseDebug').onchange=e=>{ morse.debug=e.target.checked; $('morseDebugOut').style.display=morse.debug?'block':'none'; };
-$('morseTestDot').onclick=()=>morse.event('dot');
-$('morseTestDash').onclick=()=>morse.event('dash');
-$('morseTestCommit').onclick=()=>morse.event('commit');
-$('morseSpace').onclick=()=>morse.space();
+$('morseTestDot').onclick=()=>morse.addElement('.');
+$('morseTestDash').onclick=()=>morse.addElement('-');
+$('morseTestCommit').onclick=()=>morse.commitLetter();
+$('morseSpace').onclick=()=>morse.addSpace();
 $('morseReset').onclick=()=>morse.reset();
 $('morseSend').onclick=()=>morse.send();
 
