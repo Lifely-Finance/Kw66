@@ -92,7 +92,17 @@
   </section>
 
   <section class="card">
-    <h2>4. Журнал соединения</h2>
+    <h2>4. Диагностика: сырой рекордер</h2>
+    <div class="muted">Пишет каждый входящий пакет D1 как есть (байты + время), ничего не интерпретирует. Нужен, чтобы понять, как именно часы шлют событие Play/Pause при разной длительности нажатия — не мешает обычному вводу, работает параллельно.</div>
+    <label style="margin-top:8px"><input type="checkbox" id="rawRecToggle" style="width:auto;display:inline-block"> Включить сырой рекордер</label>
+    <div class="row" style="margin-top:6px">
+      <button id="rawRecClear">Очистить</button>
+    </div>
+    <div id="rawLog" class="status" style="margin-top:8px"></div>
+  </section>
+
+  <section class="card">
+    <h2>5. Журнал соединения</h2>
     <div class="muted">Только служебные события — текст сообщений сюда никогда не попадает.</div>
     <div id="log" class="status" style="margin-top:8px"></div>
     <button id="clearLog" style="margin-top:8px">Очистить журнал</button>

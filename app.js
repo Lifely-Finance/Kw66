@@ -325,9 +325,37 @@ async function bleSend(bytes){
   else await activeTx.writeValue(u8);
 }
 
+/* ============================================================
+   Сырой рекордер (диагностика): логирует каждый входящий D1-пакет
+   как есть — байты + время + дельту от предыдущего события того же
+   кода. Ничего не классифицирует, ни на что не влияет — работает
+   параллельно с обычным вводом, чтобы понять реальное поведение
+   часов (одно событие на клик / авто-повтор при удержании /
+   отдельные коды нажатия и отпускания).
+   ============================================================ */
+const rawRec = {
+  enabled:false, lastT:{}, startT:null,
+  log(bytes){
+    const t=performance.now();
+    if(this.startT===null) this.startT=t;
+    const code=bytes.length>=2?bytes[1]:null;
+    const key=`${bytes[0]}:${code}`;
+    const prev=this.lastT[key];
+    const delta=prev!==undefined?Math.round(t-prev):null;
+    this.lastT[key]=t;
+    const el=$('rawLog');
+    if(!el) return;
+    const line=`t=${Math.round(t-this.startT)}ms  ${hex(bytes)}  ${delta!==null?`Δ=${delta}ms`:'(первое)'}`;
+    el.textContent+=(el.textContent?'\n':'')+line;
+    el.scrollTop=el.scrollHeight;
+  },
+  clear(){ this.lastT={}; this.startT=null; const el=$('rawLog'); if(el) el.textContent=''; }
+};
+
 /* ---------- сборка фрагментов D1/C5 (упрощено под нужды мессенджера) ---------- */
 function pushToBuffer(bytes){
   if(bytes.length===0) return;
+  if(rawRec.enabled) rawRec.log(bytes);
   const op=bytes[0];
   if(op===0xD1 && bytes.length>=2){ handleD1(bytes); return; }
   // C5 <seq> — квитанция куска текста от часов; для мессенджера не критична, просто пропускаем
@@ -463,6 +491,9 @@ function handleD1(b){
 $('connect').onclick=connect;
 $('disconnect').onclick=async()=>{ try{ if(device?.gatt?.connected) device.gatt.disconnect(); }catch{} };
 $('clearLog').onclick=()=>{ $('log').textContent=''; };
+
+$('rawRecToggle').onchange=e=>{ rawRec.enabled=e.target.checked; if(rawRec.enabled) rawRec.clear(); };
+$('rawRecClear').onclick=()=>rawRec.clear();
 
 $('morseDebug').onchange=e=>{ morse.debug=e.target.checked; $('morseDebugOut').style.display=morse.debug?'block':'none'; };
 $('morseTestDot').onclick=()=>morse.event('dot');
