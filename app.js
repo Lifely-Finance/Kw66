@@ -867,11 +867,11 @@ const MORSE_RU = {
   '-..-':'Ь','..-..':'Э','..--':'Ю','.-.-':'Я'
 };
 const MORSE_MAP={...MORSE_EN,...MORSE_RU};
-const MORSE_HOLD_MS = 700;
-const MORSE_REPEAT_GAP_MS = 350;
+const MORSE_HOLD_MS = 850;
+const MORSE_DOUBLE_MS = 550;
 const morse={
   pattern:'', text:'', symbols:0, letters:0, debug:false, key:null, salt:null,
-  pendingD1:null, pendingTimer:null,
+  pendingPlay:null, pendingNext:null, playTimer:null, nextTimer:null,
   setState(s){ $('morseState').textContent=s; },
   ui(){ $('morseSymbols').textContent=this.symbols; $('morseLetters').textContent=this.letters; },
   dbg(s){ if(this.debug){ const el=$('morseDebugOut'); el.style.display='block'; el.textContent+=(el.textContent?'\n':'')+`[${new Date().toLocaleTimeString()}] ${s}`; el.scrollTop=el.scrollHeight; } },
@@ -890,9 +890,9 @@ const morse={
   },
   deleteLast(){
     if(this.pattern){
-      this.pattern=this.pattern.slice(0,-1);
+      this.pattern='';
       this.setState('удаление');
-      $('morseLast').textContent='⌫ символ';
+      $('morseLast').textContent='⌫ буква';
       this.ui();
       return;
     }
@@ -906,8 +906,19 @@ const morse={
     $('morseLast').textContent='⌫ буква';
     this.ui();
   },
-  space(){ this.text+=' '; this.letters++; this.symbols++; $('morseLast').textContent='Пробел'; this.setState('пробел'); this.ui(); this.dbg('space'); },
-  reset(){ this.pattern='';this.text='';this.symbols=0;this.letters=0;this.setState('ожидание');$('morseLast').textContent='—';this.ui();$('morseDebugOut').textContent='';this.dbg('reset'); },
+  space(){
+    if(!this.text && !this.pattern) return;
+    if(this.pattern) this.event('commit','auto before space');
+    if(this.text && !this.text.endsWith(' ')){
+      this.text+=' '; this.letters++; this.symbols++;
+    }
+    $('morseLast').textContent='Пробел'; this.setState('пробел'); this.ui(); this.dbg('Next short → space');
+  },
+  reset(){
+    clearTimeout(this.playTimer); clearTimeout(this.nextTimer);
+    this.pendingPlay=null; this.pendingNext=null;
+    this.pattern='';this.text='';this.symbols=0;this.letters=0;this.setState('ожидание');$('morseLast').textContent='—';this.ui();$('morseDebugOut').textContent='';this.dbg('reset');
+  },
   async ensureKey(){
     if(this.key) return this.key;
     this.key=await crypto.subtle.generateKey({name:'AES-GCM',length:256},true,['encrypt','decrypt']);
@@ -932,8 +943,6 @@ const morse={
     return new TextDecoder().decode(plain);
   },
   async send(){
-    // For v0.1 this is deliberately a local crypto loopback, not a fake network send.
-    // It proves the exact data boundary that will later be handed to the relay/WebRTC layer.
     if(!this.text) return;
     const plaintext=this.text;
     const packet=await this.encrypt(plaintext);
@@ -958,44 +967,52 @@ const morse={
 function handleD1(b){
   if(!b || b[0]!==0xD1 || b.length<2) return false;
   const code=b[1];
-  if(code!==0x09 && code!==0x07 && code!==0x08) return false;
-
-  // KW66 repeats D1 while a button is held. We therefore wait for a possible
-  // repeat before committing a short press. A repeat within the hold window
-  // upgrades the action to the long-press command and cancels the short action.
+  if(code!==0x07 && code!==0x08 && code!==0x09) return false;
   const now=performance.now();
-  if(morse.pendingD1 && morse.pendingD1.code===code && (now-morse.pendingD1.at)<=MORSE_HOLD_MS){
-    clearTimeout(morse.pendingTimer);
-    morse.pendingD1=null;
-    if(code===0x09){
-      morse.text=morse.text;
-      morse.deleteLast();
-      morse.dbg('long Previous → delete');
-    } else if(code===0x08){
-      morse.space();
-      morse.dbg('long Next → space');
-    } else if(code===0x07){
-      morse.send().catch(e=>log(`Morse ERROR: ${e.message}`));
-      morse.dbg('long Play → send');
+
+  // New Morse controls:
+  // Play/Pause short (D1 07) = dot; long/repeated = dash.
+  // Next short (D1 08) = space; double short = send.
+  // Previous short (D1 09) = delete unfinished symbol or last letter.
+  if(code===0x07){
+    if(morse.pendingPlay && (now-morse.pendingPlay.at)<=MORSE_HOLD_MS){
+      clearTimeout(morse.playTimer);
+      morse.pendingPlay=null;
+      morse.event('dash','KW66 D1 07 long');
+      morse.dbg('long Play → dash');
+      return true;
     }
+    if(morse.pendingPlay){ clearTimeout(morse.playTimer); morse.pendingPlay=null; }
+    morse.pendingPlay={at:now};
+    morse.playTimer=setTimeout(()=>{
+      if(!morse.pendingPlay) return;
+      morse.pendingPlay=null;
+      morse.event('dot','KW66 D1 07 short');
+    },MORSE_HOLD_MS);
     return true;
   }
 
-  // Ignore a different/late event while another press is still being resolved.
-  if(morse.pendingD1){
-    clearTimeout(morse.pendingTimer);
-    morse.pendingD1=null;
+  if(code===0x08){
+    if(morse.pendingNext && (now-morse.pendingNext.at)<=MORSE_DOUBLE_MS){
+      clearTimeout(morse.nextTimer);
+      morse.pendingNext=null;
+      morse.send().catch(e=>log(`Morse ERROR: ${e.message}`));
+      morse.dbg('double Next → send');
+      return true;
+    }
+    if(morse.pendingNext){ clearTimeout(morse.nextTimer); morse.pendingNext=null; }
+    morse.pendingNext={at:now};
+    morse.nextTimer=setTimeout(()=>{
+      if(!morse.pendingNext) return;
+      morse.pendingNext=null;
+      morse.space();
+    },MORSE_DOUBLE_MS);
+    return true;
   }
 
-  morse.pendingD1={code,at:now};
-  morse.pendingTimer=setTimeout(()=>{
-    const p=morse.pendingD1;
-    morse.pendingD1=null;
-    if(!p || p.code!==code) return;
-    if(code===0x09) morse.event('dot','KW66 D1 09');
-    else if(code===0x07) morse.event('dash','KW66 D1 07');
-    else morse.event('commit','KW66 D1 08');
-  },MORSE_HOLD_MS);
+  // Previous: delete the whole unfinished Morse sequence, or the last completed letter.
+  morse.deleteLast();
+  morse.dbg('short Previous → delete');
   return true;
 }
 
