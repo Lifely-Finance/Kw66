@@ -43,7 +43,7 @@
 </head>
 <body>
 <main>
-  <h1>KW66 Lab <span class="muted">v3.5</span></h1>
+  <h1>KW66 Lab <span class="muted">v3.6</span></h1>
   <div class="muted">GloryFit BLE — protocol lab + HR-аналитика + motion probe + фаззер + btsnoop-парсер</div>
 
   <section class="card">
@@ -167,21 +167,20 @@
 
 
   <section class="card">
-    <h2>6c. KW66 Protocol Lab <span class="muted">— карта протокола + безопасные пробы движения</span></h2>
+    <h2>6c. KW66 Protocol Lab <span class="muted">— чистый Motion Sniffer</span></h2>
     <div class="muted" style="margin-bottom:8px">
-      Команды ниже разделены по уровню подтверждения. «Известно» — команда/ответ уже наблюдались в KW66-трафике.
-      «Эксперимент» — кандидат из анализа протокола; результат нужно подтвердить на твоих часах.
-      Опасные операции (сброс/OTA) здесь намеренно не добавлены.
+      Режим v3.6 не отправляет команды во время эксперимента и не создаёт искусственный A2-трафик.
+      Записывается весь входящий RX с миллисекундным временем. Цель — найти пакеты, которые появляются только при движении.
     </div>
     <div class="grid" style="margin-bottom:10px">
       <div><div class="label">Основной TX</div><div id="protoTx" class="value" style="font-size:15px">—</div></div>
       <div><div class="label">Основной RX</div><div id="protoRx" class="value" style="font-size:15px">—</div></div>
-      <div><div class="label">Пакетов RX</div><div id="protoRxCount" class="value" style="font-size:15px">0</div></div>
-      <div><div class="label">Motion-кандидаты</div><div id="motionCount" class="value" style="font-size:15px">0</div></div>
+      <div><div class="label">RX пакетов</div><div id="protoRxCount" class="value" style="font-size:15px">0</div></div>
+      <div><div class="label">Уникальных opcode</div><div id="motionCount" class="value" style="font-size:15px">0</div></div>
     </div>
     <div class="two">
       <div>
-        <div class="muted" style="margin-bottom:4px">Подтверждённые/низкорисковые</div>
+        <div class="muted" style="margin-bottom:4px">Безопасные запросы — только вне эксперимента</div>
         <div class="row">
           <button id="protoA1">A1 — модель/серийник</button>
           <button id="protoA2">A2 — батарея</button>
@@ -190,7 +189,7 @@
         </div>
       </div>
       <div>
-        <div class="muted" style="margin-bottom:4px">Motion / gesture — эксперимент</div>
+        <div class="muted" style="margin-bottom:4px">Старые экспериментальные команды</div>
         <div class="row">
           <button id="motionC401" class="warn">C4 01</button>
           <button id="motionC402" class="warn">C4 02</button>
@@ -202,17 +201,18 @@
       </div>
     </div>
     <div class="row" style="margin-top:8px">
-      <button id="motionListen" class="primary">▶ Слушать RX 30 с</button>
-      <button id="motionCorrelate" class="primary">▶ Correlator 60 с</button>
+      <button id="motionSniff" class="primary">▶ Sniffer 60 с</button>
+      <button id="motionRest" class="primary" disabled>REST</button>
+      <button id="motionMove" class="primary" disabled>MOVE</button>
+      <button id="motionShake" class="warn" disabled>SHAKE</button>
       <button id="motionExport">Экспорт JSON</button>
       <button id="motionClear">Очистить</button>
       <span class="pill" id="motionPill">готов</span>
     </div>
     <div id="motionOut" class="scroll" style="margin-top:10px"></div>
     <div class="muted" style="margin-top:8px">
-      Correlator специально сравнивает трафик в трёх фазах: <b>REST 20 с → MOVE 20 с → REST 20 с</b>.
-      В первую очередь смотрим, появляются ли <b>CB</b>, <b>31</b> или другие неизвестные RX-пакеты именно во время MOVE.
-      <b>CB/31 пока только RX-кандидаты — не отправлять их вручную.</b> C4 помечен как camera/gesture candidate, D7 — как DND candidate.
+      Порядок теста: нажми <b>Sniffer 60 с</b>. Первые ~15 с держи часы неподвижно → нажми <b>MOVE</b> и активно двигай рукой 15 с → нажми <b>REST</b> на 15 с → нажми <b>SHAKE</b> и резко потряси 15 с.
+      Маркеры можно нажимать в любой момент. <b>CB</b> и <b>31</b> остаются только RX-кандидатами; приложение их не отправляет.
     </div>
   </section>
 

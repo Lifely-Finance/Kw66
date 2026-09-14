@@ -1,5 +1,5 @@
 /* ============================================================
-   KW66 Lab v3.5
+   KW66 Lab v3.6
    GloryFit BLE: command lab + HR analytics + fuzzer + btsnoop
    v3.1: перенесены фиксы буферизации из отдельной ветки —
    F7=11 байт (min/max HR в хвосте), E5 не фиксированной длины
@@ -631,45 +631,62 @@ const fuzzer={
 
 /* ---------- KW66 protocol / motion lab ---------- */
 const protocolLab = {
-  motion: [], listening:false, correlating:false, timer:null, phaseTimer:null,
-  phase:0, phaseStart:0,
-  phases:[{name:"REST 1",ms:20000,hint:"не двигай часы"},{name:"MOVE",ms:20000,hint:"активно двигай рукой/часами"},{name:"REST 2",ms:20000,hint:"снова не двигай часы"}],
+  packets: [], sniffing:false, timer:null, phase:"REST", startedAt:0, maxPackets:12000,
   recordMotion(bytes,uuid){
-    const op=bytes[0], interesting=this.listening||this.correlating||UNKNOWN_TRACK_OPS.has(op)||op===0xC4||op===0xD7;
-    if(!interesting)return;
-    this.motion.push({t:Date.now(),uuid:labelFor(uuid),hex:hex(bytes),op,phase:this.correlating?this.phases[this.phase].name:null});
-    if(this.motion.length>2000)this.motion.shift(); this.render();
+    if(!this.sniffing) return;
+    const t=Date.now(), op=bytes[0];
+    this.packets.push({t,iso:new Date(t).toISOString(),direction:"RX",uuid:labelFor(uuid),hex:hex(bytes),op,phase:this.phase});
+    if(this.packets.length>this.maxPackets)this.packets.shift();
+    this.render();
   },
   render(){
-    $("motionCount").textContent=this.motion.length;
-    const counts={}; for(const r of this.motion){const o=r.hex.split(" ")[0];counts[o]=(counts[o]||0)+1;}
+    const counts={};
+    for(const r of this.packets){const o=r.hex.split(" ")[0];counts[o]=(counts[o]||0)+1;}
+    const unique=Object.keys(counts).length;
+    $("motionCount").textContent=unique;
     const sum=Object.entries(counts).sort((a,b)=>b[1]-a[1]).map(([o,n])=>`<span class="pill">${o} ×${n}</span>`).join(" ");
-    const rows=this.motion.slice(-180).map(r=>`<div><span class="muted">${new Date(r.t).toLocaleTimeString()}</span> <code>${r.uuid||"?"}</code> <code>${r.hex}</code> ${r.phase?`<span class="muted">${r.phase}</span>`:""}</div>`).join("");
-    $("motionOut").innerHTML=`<div style="margin-bottom:6px">${sum||'<span class="muted">нет пакетов</span>'}</div>${rows}`;
+    const rows=this.packets.slice(-220).map(r=>`<div><span class="muted">${new Date(r.t).toLocaleTimeString([], {hour12:false})}.${String(r.t%1000).padStart(3,"0")}</span> <code>${r.hex}</code> <span class="muted">${r.phase}</span></div>`).join("");
+    $("motionOut").innerHTML=`<div style="margin-bottom:6px">${sum||'<span class="muted">нет RX</span>'}</div>${rows}`;
   },
   async cmd(bytes,label,experimental=false){
+    if(this.sniffing){log("Protocol Lab: команда заблокирована во время Sniffer — нужен чистый RX.");return;}
     if(experimental&&!confirm(`${label}\n\nЭкспериментальная команда. Это не доказанный raw accelerometer-путь. Продолжить?`))return;
     try{await send(bytes);log(`Protocol Lab: ${label} → ${hex(bytes)}`);}catch(e){log(`Protocol Lab ERROR (${label}): ${e.message}`);}
   },
-  start(){if(this.listening||this.correlating)return;this.listening=true;this.motion=[];$("motionCount").textContent="0";$("motionPill").textContent="слушаю 30 с";$("motionPill").className="pill run";this.render();this.timer=setTimeout(()=>this.stop(),30000);log("Motion Lab: пассивный сбор всех RX на 30 секунд.");},
-  stop(){if(!this.listening)return;this.listening=false;if(this.timer)clearTimeout(this.timer);this.timer=null;$("motionPill").textContent="готов";$("motionPill").className="pill";this.render();log(`Motion Lab: остановлен, собрано ${this.motion.length} пакетов.`);},
-  startCorrelation(){
-    if(this.listening||this.correlating)return;this.correlating=true;this.motion=[];this.phase=0;this.phaseStart=Date.now();
-    $("motionCount").textContent="0";$("motionPill").textContent="REST 1 — 20 с";$("motionPill").className="pill run";this.render();
-    log("Motion Correlator: 60 с — REST 20 → MOVE 20 → REST 20.");this.phaseTimer=setInterval(()=>this.tickCorrelation(),250);this.timer=setTimeout(()=>this.stopCorrelation(),60000);
+  start(){
+    if(this.sniffing)return;
+    this.sniffing=true;this.packets=[];this.phase="REST";this.startedAt=Date.now();
+    $("motionPill").textContent="REST — 60 с";$("motionPill").className="pill run";
+    ["motionRest","motionMove","motionShake"].forEach(id=>$(id).disabled=false);
+    this.render();
+    log("Motion Sniffer: старт 60 с. Команды не отправляются; пишется весь RX.");
+    this.timer=setTimeout(()=>this.stop(),60000);
   },
-  tickCorrelation(){
-    if(!this.correlating)return;let elapsed=Date.now()-this.phaseStart;
-    if(elapsed>=this.phases[this.phase].ms){this.phase++;this.phaseStart=Date.now();if(this.phase>=this.phases.length){this.stopCorrelation();return;}log(`Motion Correlator: ${this.phases[this.phase].name} — ${this.phases[this.phase].hint}.`);}
-    const ph=this.phases[this.phase],left=Math.max(0,Math.ceil((ph.ms-(Date.now()-this.phaseStart))/1000));$("motionPill").textContent=`${ph.name} — ${left} с`;
+  setPhase(phase){
+    if(!this.sniffing)return;
+    this.phase=phase;
+    const elapsed=Math.floor((Date.now()-this.startedAt)/1000), left=Math.max(0,60-elapsed);
+    $("motionPill").textContent=`${phase} — ${left} с`;
+    log(`Motion Sniffer: маркер ${phase} на ${elapsed}.с`);
+    this.render();
   },
-  stopCorrelation(){
-    if(!this.correlating)return;this.correlating=false;if(this.timer)clearTimeout(this.timer);if(this.phaseTimer)clearInterval(this.phaseTimer);this.timer=null;this.phaseTimer=null;
-    $("motionPill").textContent="готов";$("motionPill").className="pill";const st={};for(const r of this.motion){const o=r.hex.split(" ")[0];st[o]=(st[o]||0)+1;}
-    log(`Motion Correlator: завершён. RX=${this.motion.length}; CB=${st.CB||0}; 31=${st["31"]||0}; B1=${st.B1||0}.`);this.render();
+  stop(){
+    if(!this.sniffing)return;
+    this.sniffing=false;if(this.timer)clearTimeout(this.timer);this.timer=null;
+    ["motionRest","motionMove","motionShake"].forEach(id=>$(id).disabled=true);
+    $("motionPill").textContent="готов";$("motionPill").className="pill";
+    const counts={};for(const r of this.packets){const o=r.hex.split(" ")[0];counts[o]=(counts[o]||0)+1;}
+    log(`Motion Sniffer: завершён. RX=${this.packets.length}; opcode=${Object.keys(counts).length}; CB=${counts.CB||0}; 31=${counts["31"]||0}; B1=${counts.B1||0}; A2=${counts.A2||0}.`);
+    this.render();
   },
-  exportCorrelation(){const blob=new Blob([JSON.stringify({version:"KW66 Lab v3.5",createdAt:new Date().toISOString(),note:"REST/MOVE/REST; CB and 31 are RX-only candidates",packets:this.motion},null,2)],{type:"application/json"});const a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download=`kw66-motion-${Date.now()}.json`;a.click();URL.revokeObjectURL(a.href);},
-  clear(){if(this.correlating)this.stopCorrelation();this.motion=[];$("motionCount").textContent="0";$("motionOut").innerHTML="";}
+  exportCorrelation(){
+    const counts={};for(const r of this.packets){const o=r.hex.split(" ")[0];counts[o]=(counts[o]||0)+1;}
+    const phases={};for(const r of this.packets){(phases[r.phase]??=[]).push(r);}
+    const summary={};for(const [ph,arr] of Object.entries(phases)){summary[ph]={packets:arr.length,opcodes:[...new Set(arr.map(x=>x.hex.split(" ")[0]))]};}
+    const blob=new Blob([JSON.stringify({version:"KW66 Lab v3.6",createdAt:new Date().toISOString(),experiment:"60s full RX sniffer",note:"Manual phases REST/MOVE/REST/SHAKE; no commands are sent during sniffing",counts,phases:summary,packets:this.packets},null,2)],{type:"application/json"});
+    const a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download=`kw66-motion-sniff-${Date.now()}.json`;a.click();URL.revokeObjectURL(a.href);
+  },
+  clear(){if(this.sniffing)this.stop();this.packets=[];$("motionCount").textContent="0";$("motionOut").innerHTML="";$("motionPill").textContent="готов";}
 };
 
 const protocolSafe = {
@@ -864,9 +881,11 @@ $("motionC403").onclick=()=>protocolLab.cmd([0xC4,0x03],"C4 03 — camera/gestur
 $("motionD700").onclick=()=>protocolLab.cmd([0xD7,0x00],"D7 00 — DND candidate",true);
 $("motionD701").onclick=()=>protocolLab.cmd([0xD7,0x01],"D7 01 — DND candidate",true);
 $("motionD702").onclick=()=>protocolLab.cmd([0xD7,0x02],"D7 02 — DND candidate",true);
-$("motionListen").onclick=()=>protocolLab.listening?protocolLab.stop():protocolLab.start();
+$("motionSniff").onclick=()=>protocolLab.sniffing?protocolLab.stop():protocolLab.start();
+$("motionRest").onclick=()=>protocolLab.setPhase("REST");
+$("motionMove").onclick=()=>protocolLab.setPhase("MOVE");
+$("motionShake").onclick=()=>protocolLab.setPhase("SHAKE");
 $("motionClear").onclick=()=>protocolLab.clear();
-$("motionCorrelate").onclick=()=>protocolLab.correlating?protocolLab.stopCorrelation():protocolLab.startCorrelation();
 $("motionExport").onclick=()=>protocolLab.exportCorrelation();
 
 
