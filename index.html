@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
   <meta name="theme-color" content="#111827">
   <link rel="manifest" href="manifest.json">
-  <title>KW66 Lab v3.3</title>
+  <title>KW66 Lab v3.7</title>
   <style>
     :root{color-scheme:dark;font-family:system-ui,-apple-system,Segoe UI,sans-serif}
     body{margin:0;background:#0b1020;color:#eef2ff}
@@ -43,7 +43,7 @@
 </head>
 <body>
 <main>
-  <h1>KW66 Lab <span class="muted">v3.6</span></h1>
+  <h1>KW66 Lab <span class="muted">v3.7</span></h1>
   <div class="muted">GloryFit BLE — protocol lab + HR-аналитика + motion probe + фаззер + btsnoop-парсер</div>
 
   <section class="card">
@@ -120,6 +120,46 @@
       <div><div class="label">Реакция (макс)</div><div id="lieSpike" class="value" style="font-size:16px">—</div></div>
       <div><div class="label">Вердикт</div><div id="lieVerdict" class="value" style="font-size:15px">—</div></div>
     </div>
+  </section>
+
+  <section class="card" id="morseCard">
+    <h2>7. Morse Messenger <span class="muted">— stealth prototype</span></h2>
+    <div class="muted" style="margin-bottom:8px">
+      KW66 становится физической клавиатурой. <b>Previous (D1 09)=точка</b>,
+      <b>Play/Pause (D1 07)=тире</b>, <b>Next (D1 08)=закончить букву</b>.
+      Сообщение не выводится на экран телефона. Внутри браузера оно сразу
+      превращается в текст, шифруется AES-256-GCM и готовится к передаче.
+    </div>
+    <div class="grid">
+      <div><div class="label">Состояние</div><div id="morseState" class="value" style="font-size:18px">ожидание</div></div>
+      <div><div class="label">Символов принято</div><div id="morseSymbols" class="value" style="font-size:18px">0</div></div>
+      <div><div class="label">Букв собрано</div><div id="morseLetters" class="value" style="font-size:18px">0</div></div>
+      <div><div class="label">Последнее событие</div><div id="morseLast" class="value" style="font-size:15px">—</div></div>
+    </div>
+    <div class="row" style="margin-top:8px">
+      <button id="morseTestDot">· Test</button>
+      <button id="morseTestDash">− Test</button>
+      <button id="morseTestCommit" class="primary">Next = буква</button>
+      <button id="morseSpace">Пробел</button>
+      <button id="morseSend" class="good">Отправить</button>
+      <button id="morseReset" class="danger">Сброс</button>
+    </div>
+    <div class="two" style="margin-top:8px">
+      <div>
+        <div class="muted">Код приглашения второго устройства</div>
+        <input id="morseInvite" placeholder="вставь код приглашения" autocomplete="off" spellcheck="false">
+        <button id="morsePair" class="primary">Связать устройства</button>
+      </div>
+      <div>
+        <div class="muted">Безопасный статус</div>
+        <div id="morseSecurity" class="status" style="min-height:54px;max-height:120px">Ключи не созданы</div>
+      </div>
+    </div>
+    <div class="muted" style="margin-top:8px">
+      По умолчанию диагностический текст скрыт. Для разработки можно включить
+      <label style="display:inline-flex;align-items:center;gap:6px;margin-left:6px"><input id="morseDebug" type="checkbox" style="width:auto"> debug</label>.
+    </div>
+    <div id="morseDebugOut" class="status" style="display:none;margin-top:8px;max-height:180px"></div>
   </section>
 
   <section class="card">

@@ -1,10 +1,10 @@
 {
-  "name": "KW66 Lab v3",
-  "short_name": "KW66 Lab",
+  "name": "KW66 Lab v3.7 — Morse Messenger",
+  "short_name": "KW66 Morse",
   "start_url": "./",
   "display": "standalone",
   "background_color": "#0b1020",
   "theme_color": "#111827",
   "lang": "ru",
-  "description": "BLE research lab for IMILAB KW66 / GloryFit: HR analytics, command fuzzer, btsnoop parser"
+  "description": "KW66 BLE lab with stealth Morse Messenger prototype"
 }
