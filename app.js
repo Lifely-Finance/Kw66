@@ -403,10 +403,18 @@ async function sendWatchText(text,id=0x01){
                                      зафиксированную)
 
    Previous/Next независимы друг от друга и не привязаны к
-   предыдущему тапу — калибровка темпа не нужна, буквы, начинающиеся
-   с тире (T, N, M, O, ...), вводятся с первого раза. Задержка перед
-   срабатыванием (окно BURST_WINDOW_MS) есть только у Play, потому
-   что там нужно дождаться, не будет ли ещё тапа в серии.
+   предыдущему тапу — калибровка темпа не нужна, буквы, начинающиеся с тире
+   (T, N, M, O, ...), вводятся с первого раза.
+
+   Время используется только для границ:
+   - короткая пауза: продолжаем текущую букву;
+   - MORSE_LETTER_GAP_MS: фиксируем букву;
+   - MORSE_WORD_GAP_MS: фиксируем букву и автоматически ставим пробел.
+
+   Play остаётся ручным управлением:
+   1 тап = буква / пробел, 2 = отправка, 3+ = удаление.
+   Для Previous/Next намеренно НЕ используется debounce/dedup в этой версии:
+   каждое пришедшее D1 09/D1 08 считается отдельным касанием.
    ============================================================ */
 const MORSE_EN={'.-':'A','-...':'B','-.-.':'C','-..':'D','.':'E','..-.':'F','--.':'G','....':'H','..':'I','.---':'J','-.-':'K','.-..':'L','--':'M','-.':'N','---':'O','.--.':'P','--.-':'Q','.-.':'R','...':'S','-':'T','..-':'U','...-':'V','.--':'W','-..-':'X','-.--':'Y','--..':'Z','-----':'0','.----':'1','..---':'2','...--':'3','....-':'4','.....':'5','-....':'6','--...':'7','---..':'8','----.':'9'};
 const MORSE_RU={'.-':'А','-...':'Б','.--':'В','--.':'Г','-..':'Д','.':'Е','...-':'Ж','--..':'З','..':'И','.---':'Й','-.-':'К','.-..':'Л','--':'М','-.':'Н','---':'О','.--.':'П','.-.':'Р','...':'С','-':'Т','..-':'У','..-.':'Ф','....':'Х','---.':'Ц','----':'Ч','--.-':'Ш','--.--':'Щ','-.--':'Ы','-..-':'Ь','..-..':'Э','..--':'Ю','.-.-':'Я'};
@@ -441,7 +449,8 @@ function nearestMorsePattern(pattern){
   return candidates[0];
 }
 const BURST_WINDOW_MS=450; // окно серии тапов Play: 1=буква/пробел, 2=отправить, 3=удалить
-const PP_BOUNCE_MS=50;     // защита от дребезга контакта на Previous/Next (точка/тире)
+const MORSE_LETTER_GAP_MS=900;  // после последнего элемента: завершить букву
+const MORSE_WORD_GAP_MS=1800;   // после последнего элемента: завершить букву + пробел
 
 function burstTracker(onFinalize,windowMs=BURST_WINDOW_MS){
   const s={count:0,timer:null};
@@ -454,28 +463,47 @@ function burstTracker(onFinalize,windowMs=BURST_WINDOW_MS){
 
 const morse={
   pattern:'', text:'', symbols:0, letters:0, debug:false,
-  lastDotT:null, lastDashT:null,
+  boundaryTimer:null, wordTimer:null,
   setState(s){ $('morseState').textContent=s; },
   ui(){ $('morseSymbols').textContent=this.symbols; $('morseLetters').textContent=this.letters; },
   dbg(s){ if(this.debug){ const el=$('morseDebugOut'); el.style.display='block'; el.textContent+=(el.textContent?'\n':'')+`[${nowStr()}] ${s}`; el.scrollTop=el.scrollHeight; } },
+  clearBoundaryTimers(){
+    clearTimeout(this.boundaryTimer);
+    clearTimeout(this.wordTimer);
+    this.boundaryTimer=null;
+    this.wordTimer=null;
+  },
+  scheduleBoundaries(){
+    this.clearBoundaryTimers();
+    this.boundaryTimer=setTimeout(()=>{
+      this.boundaryTimer=null;
+      if(this.pattern){
+        this.commitLetter(false);
+        this.setState('буква принята (пауза)');
+      }
+    },MORSE_LETTER_GAP_MS);
+    this.wordTimer=setTimeout(()=>{
+      this.wordTimer=null;
+      if(this.pattern) this.commitLetter(false);
+      if(this.text && !this.text.endsWith(' ')){
+        this.text+=' ';
+        this.symbols++;
+        this.setState('пробел (пауза)');
+        this.ui();
+        this.dbg('автоматический пробел по длинной паузе');
+      }
+    },MORSE_WORD_GAP_MS);
+  },
   addElement(sym){
     this.pattern+=sym; this.symbols++;
     $('morseLast').textContent=sym==='.'?'·':'−';
     this.setState('приём'); this.ui();
     this.dbg(`элемент ${sym} pattern=${this.pattern}`);
+    this.scheduleBoundaries();
   },
-  // Previous/Next теперь независимые кнопки-элементы (точка/тире).
-  // Дебаунс не даёт дребезгу контакта одной физической кнопки
-  // засчитаться как два тапа подряд.
-  registerTap(kind){
-    const t=performance.now();
-    const key=kind==='dot'?'lastDotT':'lastDashT';
-    if(this[key]!==null && (t-this[key])<PP_BOUNCE_MS){ this.dbg('дребезг, игнор'); return false; }
-    this[key]=t;
-    return true;
-  },
-  commitLetter(){
+  commitLetter(manual=true){
     if(!this.pattern) return false;
+    if(manual) this.clearBoundaryTimers();
     let ch=MORSE_MAP[this.pattern];
     if(!ch){
       const fixed=nearestMorsePattern(this.pattern);
@@ -489,19 +517,28 @@ const morse={
     return true;
   },
   addSpace(){
+    this.clearBoundaryTimers();
     this.commitLetter();
     if(this.text && !this.text.endsWith(' ')){ this.text+=' '; this.letters++; this.symbols++; }
     $('morseLast').textContent='Пробел'; this.setState('пробел'); this.ui(); this.dbg('пробел');
   },
   deleteLast(){
+    this.clearBoundaryTimers();
     if(this.pattern){ this.pattern=''; this.setState('удаление'); $('morseLast').textContent='⌫ буква (незаверш.)'; this.ui(); return; }
-    if(this.text){ const chars=[...this.text]; chars.pop(); this.text=chars.join(''); this.letters=Math.max(0,this.letters-1); }
+    if(this.text){
+      const chars=[...this.text];
+      const removed=chars.pop();
+      this.text=chars.join('');
+      if(removed===' ') this.symbols=Math.max(0,this.symbols-1);
+      else this.letters=Math.max(0,this.letters-1);
+    }
     this.setState('удаление'); $('morseLast').textContent='⌫ буква'; this.ui();
   },
   reset(){
+    this.clearBoundaryTimers();
     if(this.pendingTimer) clearTimeout(this.pendingTimer);
     this.pendingTimer=null; this.pendingSend=null;
-    this.pattern='';this.text='';this.symbols=0;this.letters=0;this.lastDotT=null;this.lastDashT=null;
+    this.pattern='';this.text='';this.symbols=0;this.letters=0;
     this.setState('ожидание');$('morseLast').textContent='—';this.ui();$('morseDebugOut').textContent='';this.dbg('reset');
   },
   // ВРЕМЕННО (только для тестов): отправить набранный текст прямо на
@@ -590,8 +627,8 @@ function handleD1(b){
   if(!b || b[0]!==0xD1 || b.length<2) return false;
   const code=b[1];
   if(morse.pendingSend){ morse.cancelPendingSend(); return true; } // любой тап во время превью — отмена, действие нужно повторить
-  if(code===0x09){ if(morse.registerTap('dot')) morse.addElement('.'); return true; }  // Previous: точка
-  if(code===0x08){ if(morse.registerTap('dash')) morse.addElement('-'); return true; } // Next: тире
+  if(code===0x09){ morse.addElement('.'); return true; }  // Previous: точка
+  if(code===0x08){ morse.addElement('-'); return true; } // Next: тире
   if(code===0x07){ trackPlay(); return true; }                                         // Play: команда (1/2/3 тапа)
   return false;
 }
