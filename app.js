@@ -284,7 +284,8 @@ const UUID = {
   rxAlt:"0000b004-0000-1000-8000-00805f9b34fb"
 };
 let device=null, server=null, txChars=[], activeTx=null, cameraTx=null, rxBuffers={};
-let cameraWanted=false;
+let cameraWanted=localStorage.getItem('kw66_cameraWanted')==='1';
+let disconnectHandler=null;
 
 function setBleUi(connected){
   $("bleDot").classList.toggle("on",connected);
@@ -295,11 +296,15 @@ async function connect(){
   try{
     log("Поиск устройства…");
     device=await navigator.bluetooth.requestDevice({acceptAllDevices:true, optionalServices:[UUID.service4,UUID.service5]});
-    device.addEventListener("gattserverdisconnected",()=>{
-      log("GATT отключён.");
+    if(disconnectHandler && device) device.removeEventListener('gattserverdisconnected', disconnectHandler);
+    disconnectHandler=()=>{
+      log('GATT отключён.');
       server=null; txChars=[]; activeTx=null; cameraTx=null; rxBuffers={};
       setBleUi(false);
-    }, {once:true});
+  updateCameraUi(false);
+      updateCameraUi(false);
+    };
+    device.addEventListener('gattserverdisconnected', disconnectHandler);
     server=await device.gatt.connect();
     log(`GATT подключён: ${device.name||"(без имени)"}`);
     const services=await server.getPrimaryServices();
@@ -318,11 +323,12 @@ async function connect(){
     }
     setBleUi(!!activeTx);
     log(`Готово. TX=${txChars.length}, RX=${rxChars.length}.`);
+    updateCameraUi(true);
     if(cameraWanted && cameraTx){
       // После нового GATT-сеанса состояние camera/shake-mode на часах могло сброситься.
       // Переармируем именно после подписки на notifications.
       await sleep(250);
-      await sendCameraMode(true, {rearm:true, quiet:true});
+      await sendCameraMode(true, {rearm:true, quiet:false});
     }
   }catch(e){
     log(`Ошибка подключения: ${e.name||"Error"}: ${e.message||e}`);
@@ -377,13 +383,24 @@ function packetKey(bytes){
   return bytes.length>=2 ? `${bytes[0].toString(16).padStart(2,'0').toUpperCase()}:${bytes[1].toString(16).padStart(2,'0').toUpperCase()}` : null;
 }
 function isTelemetry(bytes){ return bytes.length>=2 && bytes[0]===0xA2; }
+function isInterestingEvent(bytes){
+  if(!bytes || bytes.length<2 || isTelemetry(bytes)) return false;
+  const op=bytes[0], code=bytes[1];
+  return op===0xD1 || op===0xC4;
+}
+function updateCameraUi(connected){
+  const el=$('cameraState'); if(!el) return;
+  if(!connected){ el.textContent='Камера: часы не подключены'; el.className='muted'; return; }
+  el.textContent=cameraWanted?'Камера: режим жестов ВКЛ':'Камера: режим жестов ВЫКЛ';
+  el.className=cameraWanted?'ok':'muted';
+}
 const patternEngine = {
   patterns: JSON.parse(localStorage.getItem('kw66_patterns')||'[]'),
   capture:false, captureName:'', captureSeq:[], captureLast:0,
   activeSeq:[], lastEventT:0, gapMs:1400,
   save(){ localStorage.setItem('kw66_patterns',JSON.stringify(this.patterns)); this.render(); },
   normalize(bytes){
-    if(!bytes?.length || isTelemetry(bytes)) return null;
+    if(!bytes?.length || !isInterestingEvent(bytes)) return null;
     const key=packetKey(bytes);
     return key ? (WATCH_EVENT[key]||key) : `OP_${bytes[0].toString(16).padStart(2,'0').toUpperCase()}`;
   },
@@ -453,18 +470,20 @@ function escapeHtml(s){ return String(s).replace(/[&<>"']/g,m=>({'&':'&amp;','<'
 async function sendCameraMode(on,{rearm=false,quiet=false}={}){
   if(!cameraTx) throw new Error('Камера: TX 000033F1 недоступен — сначала подключи часы');
   if(on){
-    // C4 03 → пауза → C4 01. Это сбрасывает старое состояние режима после reconnect.
-    if(rearm || cameraWanted || on){
-      await writeCamera([0xC4,0x03]);
-      await sleep(180);
-    }
+    // После каждого нового GATT-сеанса принудительно сбрасываем режим и включаем его заново.
+    await writeCamera([0xC4,0x03]);
+    await sleep(220);
     await writeCamera([0xC4,0x01]);
     cameraWanted=true;
-    if(!quiet) log(rearm?'TX → C4 03 → C4 01 (camera mode re-arm)':'TX → C4 01 (camera mode)');
+    localStorage.setItem('kw66_cameraWanted','1');
+    updateCameraUi(true);
+    if(!quiet) log(rearm?'Камера: re-arm → C4 03 → C4 01':'Камера: ON → C4 03 → C4 01');
   }else{
     await writeCamera([0xC4,0x03]);
     cameraWanted=false;
-    if(!quiet) log('TX → C4 03 (camera mode off)');
+    localStorage.removeItem('kw66_cameraWanted');
+    updateCameraUi(true);
+    if(!quiet) log('Камера: OFF → C4 03');
   }
 }
 async function writeCamera(bytes){
@@ -476,7 +495,7 @@ async function writeCamera(bytes){
 /* ---------- сборка фрагментов D1/C5 (упрощено под нужды мессенджера) ---------- */
 function pushToBuffer(bytes){
   if(bytes.length===0) return;
-  if(rawRec.enabled && (!isTelemetry(bytes) || rawRec.includeTelemetry)) rawRec.log(bytes);
+  if(rawRec.enabled && (isInterestingEvent(bytes) || rawRec.includeTelemetry)) rawRec.log(bytes);
   patternEngine.event(bytes);
   const op=bytes[0];
   if(op===0xD1 && bytes.length>=2){ handleD1(bytes); return; }
@@ -836,6 +855,7 @@ $('forgetPair').onclick=async()=>{
     log(`Пара восстановлена (${restored.role==='a'?'A':'B'}), канал ${restored.pairId}.`);
   }
   setBleUi(false);
+  updateCameraUi(false);
   if('serviceWorker' in navigator) navigator.serviceWorker.register('./sw.js').catch(()=>{});
   log(`Web Bluetooth: ${navigator.bluetooth?'доступен':'недоступен'}.`);
 })();

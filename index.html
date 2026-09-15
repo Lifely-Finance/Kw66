@@ -100,6 +100,7 @@
     <div class="row" style="margin-top:8px">
       <button id="cameraOn">TX C4 01 — камера ON</button>
       <button id="cameraOff">TX C4 03 — камера OFF</button>
+      <span id="cameraState" class="muted" style="margin-left:8px">Камера: не подключено</span>
       <button id="eventClear">Очистить</button>
     </div>
     <div id="eventLog" class="status" style="margin-top:8px"></div>
@@ -121,7 +122,7 @@
 <section class="card">
     <h2>6. Диагностика: сырой рекордер</h2>
     <div class="muted">По умолчанию пишет события часов без периодической телеметрии A2. При необходимости A2 можно включить отдельным флажком.</div>
-    <label style="margin-top:8px"><input type="checkbox" id="rawRecToggle" style="width:auto;display:inline-block"> Включить сырой рекордер</label>
+    <label style="margin-top:8px"><input type="checkbox" id="rawRecToggle" style="width:auto;display:inline-block"> Включить сырой рекордер (только события D1/C4)</label>
     <label><input type="checkbox" id="rawTelemetryToggle" style="width:auto;display:inline-block"> Записывать также телеметрию A2</label>
     <div class="row" style="margin-top:6px">
       <button id="rawRecClear">Очистить</button>
