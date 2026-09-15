@@ -25,7 +25,7 @@
     .fp{font-family:ui-monospace,monospace;font-size:20px;letter-spacing:2px;background:#090d18;padding:10px;border-radius:9px;text-align:center;margin-top:8px}
     .status{font-family:ui-monospace,monospace;font-size:12px;white-space:pre-wrap;max-height:160px;overflow:auto;background:#090d18;border-radius:9px;padding:10px}
     .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:10px}
-    .value{font-size:20px;font-weight:700}.vlabel{color:#9ca3af;font-size:12px}
+    .value{font-size:20px;font-weight:700}.patternRow{display:flex;align-items:center;gap:8px;padding:8px 0;border-top:1px solid #1f2937}.patternAction{width:auto;display:block;flex:0 0 190px}.vlabel{color:#9ca3af;font-size:12px}
     details summary{cursor:pointer;color:#9ca3af;font-size:13px}
   </style>
 </head>
@@ -93,8 +93,33 @@
     </details>
   </section>
 
+  
   <section class="card">
-    <h2>4. Диагностика: сырой рекордер</h2>
+    <h2>4. BLE Event Monitor</h2>
+    <div class="muted">Показывает все входящие BLE-пакеты и отдельно распознаёт известные события D1/C4. Ничего не фильтрует и не изменяет.</div>
+    <div class="row" style="margin-top:8px">
+      <button id="cameraOn">TX C4 01 — камера ON</button>
+      <button id="cameraOff">TX C4 03 — камера OFF</button>
+      <button id="eventClear">Очистить</button>
+    </div>
+    <div id="eventLog" class="status" style="margin-top:8px"></div>
+  </section>
+
+  <section class="card">
+    <h2>5. Паттерны часов</h2>
+    <div class="muted">Запиши последовательность реальных событий часов, дай ей имя и назначь действие. Пауза более 1,4 с начинает новую последовательность.</div>
+    <div class="row" style="margin-top:8px">
+      <button id="patternStart" class="primary">● Записать паттерн</button>
+      <button id="patternStop" class="good">■ Сохранить</button>
+    </div>
+    <div class="muted" style="margin-top:8px">Записывается: <b id="patternCapture">—</b></div>
+    <div class="muted" style="margin-top:6px">Текущая последовательность: <b id="patternLive">—</b></div>
+    <div id="patternList" style="margin-top:10px"></div>
+    <div class="muted" style="margin-top:8px">* «Заблокировать телефон» требует Android companion/Device Admin: обычная PWA не имеет права вызвать системную блокировку. Android предоставляет lockNow() через DevicePolicyManager для приложения с соответствующими правами.</div>
+  </section>
+
+<section class="card">
+    <h2>6. Диагностика: сырой рекордер</h2>
     <div class="muted">Пишет каждый входящий пакет D1 как есть (байты + время), ничего не интерпретирует. Нужен, чтобы понять, как именно часы шлют событие Play/Pause при разной длительности нажатия — не мешает обычному вводу, работает параллельно.</div>
     <label style="margin-top:8px"><input type="checkbox" id="rawRecToggle" style="width:auto;display:inline-block"> Включить сырой рекордер</label>
     <div class="row" style="margin-top:6px">
@@ -104,7 +129,7 @@
   </section>
 
   <section class="card">
-    <h2>5. Журнал соединения</h2>
+    <h2>7. Журнал соединения</h2>
     <div class="muted">Только служебные события — текст сообщений сюда никогда не попадает.</div>
     <div id="log" class="status" style="margin-top:8px"></div>
     <button id="clearLog" style="margin-top:8px">Очистить журнал</button>

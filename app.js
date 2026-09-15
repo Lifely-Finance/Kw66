@@ -352,10 +352,122 @@ const rawRec = {
   clear(){ this.lastT={}; this.startT=null; const el=$('rawLog'); if(el) el.textContent=''; }
 };
 
+
+/* ============================================================
+   Event Monitor + programmable watch patterns
+   Все входящие BLE-пакеты проходят через нормализатор событий.
+   Паттерны сохраняются локально и могут запускать действия.
+   ============================================================ */
+const WATCH_EVENT = {
+  'D1:09':'DOT', 'D1:08':'DASH', 'D1:07':'PLAY',
+  'D1:11':'CAMERA_OPEN', 'D1:0F':'CAMERA_CLOSE',
+  'C4:01':'CAMERA_MODE_ON', 'C4:02':'CAMERA_SHUTTER', 'C4:03':'CAMERA_MODE_OFF'
+};
+const patternEngine = {
+  patterns: JSON.parse(localStorage.getItem('kw66_patterns')||'[]'),
+  capture:false, captureName:'', captureSeq:[], captureLast:0,
+  activeSeq:[], lastEventT:0, gapMs:1400,
+  save(){ localStorage.setItem('kw66_patterns',JSON.stringify(this.patterns)); this.render(); },
+  normalize(bytes){
+    if(!bytes?.length) return null;
+    const key=bytes.length>=2?`${bytes[0].toString(16).padStart(2,'0').toUpperCase()}:${bytes[1].toString(16).padStart(2,'0').toUpperCase()}`:null;
+    return key ? (WATCH_EVENT[key]||key) : `OP_${bytes[0].toString(16).padStart(2,'0').toUpperCase()}`;
+  },
+  event(bytes){
+    const name=this.normalize(bytes); if(!name) return;
+    const t=performance.now();
+    const dt=this.lastEventT?Math.round(t-this.lastEventT):null;
+    this.lastEventT=t;
+    const el=$('eventLog');
+    if(el){
+      const key=bytes.length>=2?`${hex(bytes)}`:hex(bytes);
+      const label=WATCH_EVENT[`${bytes[0].toString(16).padStart(2,'0').toUpperCase()}:${bytes[1]?.toString(16).padStart(2,'0').toUpperCase()}`]||'UNKNOWN';
+      const line=`${new Date().toLocaleTimeString()}  ${key}  → ${label}${dt!==null?`  Δ${dt}ms`:''}`;
+      el.textContent+=(el.textContent?'\n':'')+line; el.scrollTop=el.scrollHeight;
+    }
+    if(this.capture){
+      if(this.captureLast && t-this.captureLast>this.gapMs) this.captureSeq=[];
+      this.captureSeq.push(name); this.captureLast=t; this.renderCapture();
+      return;
+    }
+    if(this.activeSeq.length && t-this.lastEventT>this.gapMs) this.activeSeq=[]; // kept for clarity; timeout handled below
+    if(this.activeSeq.length && dt!==null && dt>this.gapMs) this.activeSeq=[];
+    this.activeSeq.push(name);
+    if(this.activeSeq.length>12) this.activeSeq.shift();
+    this.match();
+    this.renderLive();
+  },
+  match(){
+    for(const p of this.patterns){
+      if(!p.enabled) continue;
+      if(this.activeSeq.length>=p.seq.length){
+        const tail=this.activeSeq.slice(-p.seq.length);
+        if(tail.every((x,i)=>x===p.seq[i])){
+          this.runAction(p.action,p.name);
+          this.activeSeq=[];
+          return;
+        }
+      }
+    }
+  },
+  runAction(action,name){
+    log(`Паттерн «${name}» сработал → ${action}`);
+    if(action==='LOCK_PHONE'){
+      log('LOCK_PHONE: PWA не может напрямую заблокировать Android. Нужен Android companion с DevicePolicyManager/Device Admin.');
+      return;
+    }
+    if(action==='CAMERA_PROBE'){
+      sendCameraMode(true).catch(e=>log(`Camera probe: ${e.message}`));
+      return;
+    }
+    if(action==='CLEAR_MORSE'){ morse.reset(); return; }
+    if(action==='PLAY_NEXT'){ try{ bleSend(Uint8Array.from([0xD1,0x08])); }catch(e){ log(`Действие: ${e.message}`); } return; }
+  },
+  startCapture(){
+    this.capture=true; this.captureSeq=[]; this.captureLast=0; this.renderCapture();
+    log('Запись паттерна: выполняй последовательность кнопок/жестов на часах.');
+  },
+  stopCapture(){
+    this.capture=false; this.renderCapture();
+    return this.captureSeq.slice();
+  },
+  renderCapture(){
+    const el=$('patternCapture'); if(!el) return;
+    el.textContent=this.captureSeq.length?this.captureSeq.join(' → '):'—';
+  },
+  renderLive(){
+    const el=$('patternLive'); if(el) el.textContent=this.activeSeq.join(' → ')||'—';
+  },
+  render(){
+    const el=$('patternList'); if(!el) return;
+    el.innerHTML='';
+    if(!this.patterns.length){ el.innerHTML='<div class="muted">Паттернов пока нет.</div>'; return; }
+    this.patterns.forEach((p,i)=>{
+      const row=document.createElement('div'); row.className='patternRow';
+      row.innerHTML=`<div style="flex:1"><b>${escapeHtml(p.name)}</b><div class="muted">${escapeHtml(p.seq.join(' → '))}</div></div><select data-i="${i}" class="patternAction">
+        <option value="LOCK_PHONE"${p.action==='LOCK_PHONE'?' selected':''}>Заблокировать телефон*</option>
+        <option value="CAMERA_PROBE"${p.action==='CAMERA_PROBE'?' selected':''}>Режим камеры</option>
+        <option value="CLEAR_MORSE"${p.action==='CLEAR_MORSE'?' selected':''}>Сбросить Морзе</option>
+        <option value="PLAY_NEXT"${p.action==='PLAY_NEXT'?' selected':''}>Тест: Next</option>
+      </select><button data-del="${i}" class="danger">×</button>`;
+      el.appendChild(row);
+    });
+    el.querySelectorAll('.patternAction').forEach(s=>s.onchange=()=>{this.patterns[+s.dataset.i].action=s.value;this.save();});
+    el.querySelectorAll('[data-del]').forEach(b=>b.onclick=()=>{this.patterns.splice(+b.dataset.del,1);this.save();});
+  }
+};
+function escapeHtml(s){ return String(s).replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m])); }
+
+async function sendCameraMode(on){
+  await bleSend(Uint8Array.from(on?[0xC4,0x01]:[0xC4,0x03]));
+  log(on?'TX → C4 01 (camera mode)':'TX → C4 03 (camera mode off)');
+}
+
 /* ---------- сборка фрагментов D1/C5 (упрощено под нужды мессенджера) ---------- */
 function pushToBuffer(bytes){
   if(bytes.length===0) return;
   if(rawRec.enabled) rawRec.log(bytes);
+  patternEngine.event(bytes); // сначала фиксируем сырой BLE event для монитора/паттернов
   const op=bytes[0];
   if(op===0xD1 && bytes.length>=2){ handleD1(bytes); return; }
   // C5 <seq> — квитанция куска текста от часов; для мессенджера не критична, просто пропускаем
@@ -651,6 +763,20 @@ $('morseSpace').onclick=()=>morse.addSpace();
 $('morseReset').onclick=()=>morse.reset();
 $('morseSend').onclick=()=>morse.requestSend();
 $('morseSimulateReceive').onclick=()=>morse.simulateReceive();
+$('eventClear').onclick=()=>{ const e=$('eventLog'); if(e)e.textContent=''; };
+$('patternStart').onclick=()=>patternEngine.startCapture();
+$('patternStop').onclick=()=>{
+  const seq=patternEngine.stopCapture();
+  if(!seq.length){ log('Паттерн пустой.'); return; }
+  const name=prompt('Название паттерна:', 'Новый паттерн');
+  if(!name) return;
+  patternEngine.patterns.push({name,seq,action:'LOCK_PHONE',enabled:true});
+  patternEngine.save();
+  log(`Паттерн «${name}» сохранён: ${seq.join(' → ')}`);
+};
+$('cameraOn').onclick=()=>sendCameraMode(true).catch(e=>log(`C4 01: ${e.message}`));
+$('cameraOff').onclick=()=>sendCameraMode(false).catch(e=>log(`C4 03: ${e.message}`));
+patternEngine.render();
 
 $('sbSave').onclick=()=>{
   const url=$('sbUrl').value.trim(), key=$('sbKey').value.trim();
