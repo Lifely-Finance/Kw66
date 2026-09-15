@@ -283,7 +283,8 @@ const UUID = {
   txAlt:"0000b003-0000-1000-8000-00805f9b34fb",
   rxAlt:"0000b004-0000-1000-8000-00805f9b34fb"
 };
-let device=null, server=null, txChars=[], activeTx=null, rxBuffers={};
+let device=null, server=null, txChars=[], activeTx=null, cameraTx=null, rxBuffers={};
+let cameraWanted=false;
 
 function setBleUi(connected){
   $("bleDot").classList.toggle("on",connected);
@@ -295,8 +296,10 @@ async function connect(){
     log("Поиск устройства…");
     device=await navigator.bluetooth.requestDevice({acceptAllDevices:true, optionalServices:[UUID.service4,UUID.service5]});
     device.addEventListener("gattserverdisconnected",()=>{
-      log("GATT отключён."); server=null; txChars=[]; activeTx=null; rxBuffers={}; setBleUi(false);
-    });
+      log("GATT отключён.");
+      server=null; txChars=[]; activeTx=null; cameraTx=null; rxBuffers={};
+      setBleUi(false);
+    }, {once:true});
     server=await device.gatt.connect();
     log(`GATT подключён: ${device.name||"(без имени)"}`);
     const services=await server.getPrimaryServices();
@@ -304,7 +307,8 @@ async function connect(){
     for(const s of services){ for(const c of await s.getCharacteristics()) chars.push(c); }
     txChars=chars.filter(c=>[UUID.tx4,UUID.tx5,UUID.txAlt].some(u=>u===c.uuid.toLowerCase()) && (c.properties?.write||c.properties?.writeWithoutResponse));
     const rxChars=chars.filter(c=>[UUID.rx4,UUID.rx5,UUID.rxAlt].some(u=>u===c.uuid.toLowerCase()) && (c.properties?.notify||c.properties?.indicate));
-    activeTx=txChars[0]||null;
+    cameraTx=chars.find(c=>c.uuid.toLowerCase()===UUID.tx4 && (c.properties?.write||c.properties?.writeWithoutResponse))||null;
+    activeTx=cameraTx||txChars[0]||null;
     for(const c of rxChars){
       await c.startNotifications();
       c.addEventListener("characteristicvaluechanged",e=>{
@@ -314,6 +318,12 @@ async function connect(){
     }
     setBleUi(!!activeTx);
     log(`Готово. TX=${txChars.length}, RX=${rxChars.length}.`);
+    if(cameraWanted && cameraTx){
+      // После нового GATT-сеанса состояние camera/shake-mode на часах могло сброситься.
+      // Переармируем именно после подписки на notifications.
+      await sleep(250);
+      await sendCameraMode(true, {rearm:true, quiet:true});
+    }
   }catch(e){
     log(`Ошибка подключения: ${e.name||"Error"}: ${e.message||e}`);
   }
@@ -334,7 +344,7 @@ async function bleSend(bytes){
    отдельные коды нажатия и отпускания).
    ============================================================ */
 const rawRec = {
-  enabled:false, lastT:{}, startT:null,
+  enabled:false, includeTelemetry:false, lastT:{}, startT:null,
   log(bytes){
     const t=performance.now();
     if(this.startT===null) this.startT=t;
@@ -363,14 +373,18 @@ const WATCH_EVENT = {
   'D1:11':'CAMERA_OPEN', 'D1:0F':'CAMERA_CLOSE',
   'C4:01':'CAMERA_MODE_ON', 'C4:02':'CAMERA_SHUTTER', 'C4:03':'CAMERA_MODE_OFF'
 };
+function packetKey(bytes){
+  return bytes.length>=2 ? `${bytes[0].toString(16).padStart(2,'0').toUpperCase()}:${bytes[1].toString(16).padStart(2,'0').toUpperCase()}` : null;
+}
+function isTelemetry(bytes){ return bytes.length>=2 && bytes[0]===0xA2; }
 const patternEngine = {
   patterns: JSON.parse(localStorage.getItem('kw66_patterns')||'[]'),
   capture:false, captureName:'', captureSeq:[], captureLast:0,
   activeSeq:[], lastEventT:0, gapMs:1400,
   save(){ localStorage.setItem('kw66_patterns',JSON.stringify(this.patterns)); this.render(); },
   normalize(bytes){
-    if(!bytes?.length) return null;
-    const key=bytes.length>=2?`${bytes[0].toString(16).padStart(2,'0').toUpperCase()}:${bytes[1].toString(16).padStart(2,'0').toUpperCase()}`:null;
+    if(!bytes?.length || isTelemetry(bytes)) return null;
+    const key=packetKey(bytes);
     return key ? (WATCH_EVENT[key]||key) : `OP_${bytes[0].toString(16).padStart(2,'0').toUpperCase()}`;
   },
   event(bytes){
@@ -380,8 +394,8 @@ const patternEngine = {
     this.lastEventT=t;
     const el=$('eventLog');
     if(el){
-      const key=bytes.length>=2?`${hex(bytes)}`:hex(bytes);
-      const label=WATCH_EVENT[`${bytes[0].toString(16).padStart(2,'0').toUpperCase()}:${bytes[1]?.toString(16).padStart(2,'0').toUpperCase()}`]||'UNKNOWN';
+      const key=hex(bytes);
+      const label=WATCH_EVENT[packetKey(bytes)]||'UNKNOWN';
       const line=`${new Date().toLocaleTimeString()}  ${key}  → ${label}${dt!==null?`  Δ${dt}ms`:''}`;
       el.textContent+=(el.textContent?'\n':'')+line; el.scrollTop=el.scrollHeight;
     }
@@ -390,7 +404,6 @@ const patternEngine = {
       this.captureSeq.push(name); this.captureLast=t; this.renderCapture();
       return;
     }
-    if(this.activeSeq.length && t-this.lastEventT>this.gapMs) this.activeSeq=[]; // kept for clarity; timeout handled below
     if(this.activeSeq.length && dt!==null && dt>this.gapMs) this.activeSeq=[];
     this.activeSeq.push(name);
     if(this.activeSeq.length>12) this.activeSeq.shift();
@@ -402,45 +415,25 @@ const patternEngine = {
       if(!p.enabled) continue;
       if(this.activeSeq.length>=p.seq.length){
         const tail=this.activeSeq.slice(-p.seq.length);
-        if(tail.every((x,i)=>x===p.seq[i])){
-          this.runAction(p.action,p.name);
-          this.activeSeq=[];
-          return;
-        }
+        if(tail.every((x,i)=>x===p.seq[i])){ this.runAction(p.action,p.name); this.activeSeq=[]; return; }
       }
     }
   },
   runAction(action,name){
     log(`Паттерн «${name}» сработал → ${action}`);
     if(action==='LOCK_PHONE'){
-      log('LOCK_PHONE: PWA не может напрямую заблокировать Android. Нужен Android companion с DevicePolicyManager/Device Admin.');
-      return;
+      log('LOCK_PHONE: PWA не может напрямую заблокировать Android. Нужен Android companion с DevicePolicyManager/Device Admin.'); return;
     }
-    if(action==='CAMERA_PROBE'){
-      sendCameraMode(true).catch(e=>log(`Camera probe: ${e.message}`));
-      return;
-    }
+    if(action==='CAMERA_PROBE'){ sendCameraMode(true).catch(e=>log(`Camera probe: ${e.message}`)); return; }
     if(action==='CLEAR_MORSE'){ morse.reset(); return; }
-    if(action==='PLAY_NEXT'){ try{ bleSend(Uint8Array.from([0xD1,0x08])); }catch(e){ log(`Действие: ${e.message}`); } return; }
+    if(action==='PLAY_NEXT'){ bleSend(Uint8Array.from([0xD1,0x08])).catch(e=>log(`Действие: ${e.message}`)); return; }
   },
-  startCapture(){
-    this.capture=true; this.captureSeq=[]; this.captureLast=0; this.renderCapture();
-    log('Запись паттерна: выполняй последовательность кнопок/жестов на часах.');
-  },
-  stopCapture(){
-    this.capture=false; this.renderCapture();
-    return this.captureSeq.slice();
-  },
-  renderCapture(){
-    const el=$('patternCapture'); if(!el) return;
-    el.textContent=this.captureSeq.length?this.captureSeq.join(' → '):'—';
-  },
-  renderLive(){
-    const el=$('patternLive'); if(el) el.textContent=this.activeSeq.join(' → ')||'—';
-  },
+  startCapture(){ this.capture=true; this.captureSeq=[]; this.captureLast=0; this.renderCapture(); log('Запись паттерна: выполняй последовательность кнопок/жестов на часах.'); },
+  stopCapture(){ this.capture=false; this.renderCapture(); return this.captureSeq.slice(); },
+  renderCapture(){ const el=$('patternCapture'); if(el) el.textContent=this.captureSeq.length?this.captureSeq.join(' → '):'—'; },
+  renderLive(){ const el=$('patternLive'); if(el) el.textContent=this.activeSeq.join(' → ')||'—'; },
   render(){
-    const el=$('patternList'); if(!el) return;
-    el.innerHTML='';
+    const el=$('patternList'); if(!el) return; el.innerHTML='';
     if(!this.patterns.length){ el.innerHTML='<div class="muted">Паттернов пока нет.</div>'; return; }
     this.patterns.forEach((p,i)=>{
       const row=document.createElement('div'); row.className='patternRow';
@@ -457,20 +450,36 @@ const patternEngine = {
   }
 };
 function escapeHtml(s){ return String(s).replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m])); }
-
-async function sendCameraMode(on){
-  await bleSend(Uint8Array.from(on?[0xC4,0x01]:[0xC4,0x03]));
-  log(on?'TX → C4 01 (camera mode)':'TX → C4 03 (camera mode off)');
+async function sendCameraMode(on,{rearm=false,quiet=false}={}){
+  if(!cameraTx) throw new Error('Камера: TX 000033F1 недоступен — сначала подключи часы');
+  if(on){
+    // C4 03 → пауза → C4 01. Это сбрасывает старое состояние режима после reconnect.
+    if(rearm || cameraWanted || on){
+      await writeCamera([0xC4,0x03]);
+      await sleep(180);
+    }
+    await writeCamera([0xC4,0x01]);
+    cameraWanted=true;
+    if(!quiet) log(rearm?'TX → C4 03 → C4 01 (camera mode re-arm)':'TX → C4 01 (camera mode)');
+  }else{
+    await writeCamera([0xC4,0x03]);
+    cameraWanted=false;
+    if(!quiet) log('TX → C4 03 (camera mode off)');
+  }
+}
+async function writeCamera(bytes){
+  const u8=Uint8Array.from(bytes);
+  if(cameraTx.properties.writeWithoutResponse && !cameraTx.properties.write) await cameraTx.writeValueWithoutResponse(u8);
+  else await cameraTx.writeValue(u8);
 }
 
 /* ---------- сборка фрагментов D1/C5 (упрощено под нужды мессенджера) ---------- */
 function pushToBuffer(bytes){
   if(bytes.length===0) return;
-  if(rawRec.enabled) rawRec.log(bytes);
-  patternEngine.event(bytes); // сначала фиксируем сырой BLE event для монитора/паттернов
+  if(rawRec.enabled && (!isTelemetry(bytes) || rawRec.includeTelemetry)) rawRec.log(bytes);
+  patternEngine.event(bytes);
   const op=bytes[0];
   if(op===0xD1 && bytes.length>=2){ handleD1(bytes); return; }
-  // C5 <seq> — квитанция куска текста от часов; для мессенджера не критична, просто пропускаем
 }
 
 /* ---------- 0xC5: произвольный текст на экран часов (протокол подтверждён ранее) ---------- */
@@ -753,6 +762,8 @@ $('disconnect').onclick=async()=>{ try{ if(device?.gatt?.connected) device.gatt.
 $('clearLog').onclick=()=>{ $('log').textContent=''; };
 
 $('rawRecToggle').onchange=e=>{ rawRec.enabled=e.target.checked; if(rawRec.enabled) rawRec.clear(); };
+$('rawTelemetryToggle').onchange=e=>{ rawRec.includeTelemetry=e.target.checked; };
+$('eventClear').onclick=()=>{ $('eventLog').textContent=''; patternEngine.activeSeq=[]; patternEngine.renderLive(); };
 $('rawRecClear').onclick=()=>rawRec.clear();
 
 $('morseDebug').onchange=e=>{ morse.debug=e.target.checked; $('morseDebugOut').style.display=morse.debug?'block':'none'; };

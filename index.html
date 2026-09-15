@@ -96,7 +96,7 @@
   
   <section class="card">
     <h2>4. BLE Event Monitor</h2>
-    <div class="muted">Показывает все входящие BLE-пакеты и отдельно распознаёт известные события D1/C4. Ничего не фильтрует и не изменяет.</div>
+    <div class="muted">Показывает только события и неизвестные пакеты. Периодическая телеметрия A2 скрыта, чтобы журнал не забивался.</div>
     <div class="row" style="margin-top:8px">
       <button id="cameraOn">TX C4 01 — камера ON</button>
       <button id="cameraOff">TX C4 03 — камера OFF</button>
@@ -120,8 +120,9 @@
 
 <section class="card">
     <h2>6. Диагностика: сырой рекордер</h2>
-    <div class="muted">Пишет каждый входящий пакет D1 как есть (байты + время), ничего не интерпретирует. Нужен, чтобы понять, как именно часы шлют событие Play/Pause при разной длительности нажатия — не мешает обычному вводу, работает параллельно.</div>
+    <div class="muted">По умолчанию пишет события часов без периодической телеметрии A2. При необходимости A2 можно включить отдельным флажком.</div>
     <label style="margin-top:8px"><input type="checkbox" id="rawRecToggle" style="width:auto;display:inline-block"> Включить сырой рекордер</label>
+    <label><input type="checkbox" id="rawTelemetryToggle" style="width:auto;display:inline-block"> Записывать также телеметрию A2</label>
     <div class="row" style="margin-top:6px">
       <button id="rawRecClear">Очистить</button>
     </div>

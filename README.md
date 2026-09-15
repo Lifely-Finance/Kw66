@@ -27,3 +27,12 @@ Added:
 - Patterns are stored locally in localStorage.
 - Default actions include camera probe, Morse reset, test Next, and LOCK_PHONE placeholder.
 - LOCK_PHONE is intentionally not faked: a normal Android PWA cannot directly invoke system device lock. A native Android companion with DevicePolicyManager/Device Admin is required.
+
+
+## v7: clean event logging + camera re-arm
+- A2 telemetry is hidden from the Event Monitor and Pattern Engine by default.
+- Raw recorder also ignores A2 unless “Записывать также телеметрию A2” is enabled.
+- Camera commands use the dedicated 000033F1 TX characteristic.
+- Camera ON performs C4 03 -> 180 ms -> C4 01 to re-arm the watch motion detector.
+- If camera mode was active before a GATT disconnect, it is automatically re-armed after reconnect and notification subscriptions are restored.
+- Event Monitor remains focused on D1/C4/unknown non-A2 packets.
